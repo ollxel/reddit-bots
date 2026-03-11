@@ -4,6 +4,12 @@ import json
 from datetime import datetime
 import requests
 from typing import List, Dict, Optional, Any
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
 
 class RedditParser:
     """
@@ -498,57 +504,170 @@ class RedditParser:
         
         return stats
 
+class Model:  # Переименовал с маленькой буквы на заглавную (PEP 8)
+    @staticmethod
+    def prepare_data(filepath: str = 'reddit_dead_internet_analysis_2026.csv'):
+        """Загружает и подготавливает обучающие данные"""
+        
+        data = pd.read_csv(filepath)
+        print(f"✓ Загружено {len(data)} строк для обучения")
+        
+        # Безопасное удаление колонок
+        columns_to_drop = ['subreddit', 'comment_id', 'bot_type_label', 
+                          'bot_probability', 'contains_links', 'avg_word_length']
+        data = data.drop(columns=[c for c in columns_to_drop if c in data.columns], errors='ignore')
+        
+        # Создаём новый признак, если есть нужные колонки
+        required_cols = ['account_age_days', 'user_karma', 'reply_delay_seconds']
+        if all(col in data.columns for col in required_cols):
+            data['hum_val'] = (data['account_age_days'] + data['user_karma']) * data['reply_delay_seconds']
+            data = data.drop(columns=required_cols)
+        
+        return data
+    
+    @staticmethod
+    def prepare_parser_data(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Подготавливает данные из парсера для предсказания.
+        Применяет те же преобразования, что и при обучении.
+        """
+        data = df.copy()
+        
+        # Проверяем наличие нужных колонок
+        required_cols = ['account_age_days', 'user_karma', 'reply_delay_seconds']
+        missing = [col for col in required_cols if col not in data.columns]
+        if missing:
+            raise ValueError(f"❌ В данных парсера нет колонок: {missing}")
+        
+        # Создаём тот же признак hum_val
+        data['hum_val'] = (data['account_age_days'] + data['user_karma']) * data['reply_delay_seconds']
+        
+        # Сохраняем username для вывода
+        usernames = data['username'].copy() if 'username' in data.columns else None
+        
+        # Оставляем только признаки (как в обучении)
+        X = data[['hum_val']].fillna(0)
+        
+        return X, usernames
+    
+    @staticmethod
+    def train_model(data):
+        """Обучает модель и возвращает классификатор"""
+        
+        if 'is_bot_flag' not in data.columns:
+            raise ValueError("❌ В данных нет колонки 'is_bot_flag'")
+        
+        y = data['is_bot_flag']
+        X = data.drop(columns=['is_bot_flag', 'sentiment_score']).fillna(0)
+        
+        stratify_param = y if len(y.unique()) > 1 else None
+        
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=stratify_param
+        )
+        
+        clf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+        clf.fit(X_train, y_train)
+        
+        y_pred = clf.predict(X_test)
+        print("\n" + "="*60)
+        print("📊 ОТЧЁТ ОБ ОБУЧЕНИИ")
+        print("="*60)
+        print(classification_report(y_test, y_pred))
+        print("Confusion Matrix:")
+        print(confusion_matrix(y_test, y_pred))
+        
+        return clf
+    
+    @staticmethod
+    def predict(clf, df: pd.DataFrame):
+        """
+        Делает предсказания на данных парсера.
+        Возвращает DataFrame с username и prediction.
+        """
+        # Подготавливаем данные (те же преобразования что при обучении)
+        X, usernames = Model.prepare_parser_data(df)
+        
+        predictions = clf.predict(X)
+        probabilities = clf.predict_proba(X) if hasattr(clf, 'predict_proba') else None
+        
+        # Создаём результат с username
+        result = pd.DataFrame({
+            'username': usernames if usernames is not None else range(len(predictions)),
+            'is_bot_flag': predictions,
+        })
+        
+        if probabilities is not None:
+            result['bot_probability'] = probabilities[:, 1] if probabilities.shape[1] > 1 else probabilities[:, 0]
+        
+        print(f"\n✓ Предсказаний: {len(predictions)}")
+        print(f"  Боты: {sum(predictions)}, Люди: {len(predictions) - sum(predictions)}")
+        
+        return result
 
 
 if __name__ == "__main__":
-    # Initialize parser
-    parser = RedditParser(user_agent="RedditDataCollector/1.0 (Educational purposes)")
+    # === ЧАСТЬ 1: Парсинг ===
+    parse = input("Start parse? y/n: ").strip().lower()
+    df_raw = None
     
-    print("="*60)
-    print("Reddit Data Collector")
-    print("Collects: reply_delay_seconds, user_karma, account_age_days")
-    print("Note: ONE comment per unique user")
-    print("="*60)
+    if parse in ["y", "yes"]:
+        parser = RedditParser(user_agent="RedditDataCollector/1.0 (Educational)")
+        df_raw = parser.parse_subreddit_comments(
+            "AskReddit",
+            posts_limit=10,
+            category='hot',
+            time_filter='week',
+            target_comments=100
+        )
+        if not df_raw.empty:
+            print(f"\n✓ Собрано {len(df_raw)} уникальных пользователей")
+            parser.save_to_csv("collected_reddit_data.csv")
     
-    # Example 1: Parse comments from a subreddit
-    df = parser.parse_subreddit_comments(
-        "AskReddit",
-        posts_limit=10,
-        category='hot',
-        time_filter='week',
-        target_comments=100  # Collect 100 unique users
-    )
+    # === ЧАСТЬ 2: Модель ===
+    run_model = input("\nRun ML model? y/n: ").strip().lower()
     
-    # Example 2: Parse comments from a single post
-    # df = parser.parse_post_comments(
-    #     "https://www.reddit.com/r/AskReddit/comments/example/",
-    #     target_comments=100
-    # )
-    
-    # Example 3: Parse comments from multiple posts
-    # post_urls = [
-    #     "https://www.reddit.com/r/AskReddit/comments/example1/",
-    #     "https://www.reddit.com/r/Python/comments/example2/",
-    # ]
-    # df = parser.parse_multiple_posts(post_urls, target_comments=100)
-    
-    # Display results
-    if not df.empty:
-        print("\n" + "="*60)
-        print("COLLECTED DATA PREVIEW")
-        print("="*60)
-        print(f"\nTotal unique users: {len(df)}")
-        print(f"\nFirst 5 entries:")
-        print(df[['reply_delay_seconds', 'user_karma', 'account_age_days', 'username']].head())
-        
-        print(f"\n" + "="*60)
-        print("STATISTICS")
-        print("="*60)
-        stats = parser.get_stats()
-        print(f"Average reply delay: {stats['avg_reply_delay']:.0f} seconds ({stats['avg_reply_delay']/3600:.1f} hours)")
-        print(f"Average user karma: {stats['avg_user_karma']:.0f}")
-        print(f"Average account age: {stats['avg_account_age']:.0f} days ({stats['avg_account_age']/365:.1f} years)")
-        
-        print(f"\nMedian reply delay: {stats['median_reply_delay']:.0f} seconds ({stats['median_reply_delay']/3600:.1f} hours)")
-        print(f"Median user karma: {stats['median_user_karma']:.0f}")
-        print(f"Median account age: {stats['median_account_age']:.0f} days ({stats['median_account_age']/365:.1f} years)")
+    if run_model in ["y", "yes"]:
+        try:
+            print("\n[1/3] Загрузка обучающих данных...")
+            train_data = Model.prepare_data('reddit_dead_internet_analysis_2026.csv')
+            
+            print("\n[2/3] Обучение модели...")
+            clf = Model.train_model(train_data)
+            
+            print("\n[3/3] Предсказание...")
+            
+            # Выбираем источник данных для предсказания
+            if df_raw is not None and not df_raw.empty:
+                print("  → Используем данные из парсера")
+                predict_source = df_raw
+            else:
+                # Если нет данных парсера, пробуем загрузить из CSV
+                csv_file = input("  → Введите путь к CSV с данными для предсказания (Enter для collected_reddit_data.csv): ").strip()
+                if not csv_file:
+                    csv_file = 'collected_reddit_data.csv'
+                predict_source = pd.read_csv(csv_file)
+                print(f"  → Загружено {len(predict_source)} записей из {csv_file}")
+            
+            # Делаем предсказание
+            predictions_df = Model.predict(clf, predict_source)
+            
+            # Сохраняем результат
+            predictions_df.to_csv('model_predictions.csv', index=False)
+            print("\n" + "="*60)
+            print("📋 РЕЗУЛЬТАТЫ ПРЕДСКАЗАНИЯ")
+            print("="*60)
+            print(predictions_df.head(10))
+            print(f"\n✓ Результаты сохранены в 'model_predictions.csv'")
+            print(f"  Всего пользователей: {len(predictions_df)}")
+            print(f"  Ботов обнаружено: {predictions_df['is_bot_flag'].sum()}")
+            print(f"  Людей: {len(predictions_df) - predictions_df['is_bot_flag'].sum()}")
+            
+        except FileNotFoundError as e:
+            print(f"❌ Файл не найден: {e}")
+        except KeyError as e:
+            print(f"❌ Ошибка: в данных нет колонки {e}")
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+            import traceback
+            traceback.print_exc()
