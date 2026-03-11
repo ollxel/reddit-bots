@@ -1,62 +1,74 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Reddit Parser - CLI и Web интерфейс для парсинга комментариев Reddit
 """
 import os
 import sys
+
+# Fix Windows encoding - simplified approach
+if sys.platform == 'win32':
+    try:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import subprocess
 import webbrowser
 import time
 from pathlib import Path
 
-# Цвета для CLI
-class Colors:
-    BLUE = '\033[94m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    PURPLE = '\033[95m'
-    CYAN = '\033[96m'
-    BOLD = '\033[1m'
-    END = '\033[0m'
+
+def c(color, text):
+    """Apply color to text"""
+    colors = {
+        'BLUE': '\033[94m',
+        'GREEN': '\033[92m',
+        'YELLOW': '\033[93m',
+        'RED': '\033[91m',
+        'PURPLE': '\033[95m',
+        'CYAN': '\033[96m',
+        'BOLD': '\033[1m',
+        'END': '\033[0m'
+    }
+    return f"{colors.get(color, '')}{text}{colors['END']}"
 
 
 def print_header():
     """Выводит заголовок приложения"""
     os.system('cls' if os.name == 'nt' else 'clear')
-    print(f"""
-{Colors.CYAN}{Colors.BOLD}
-╔═══════════════════════════════════════════════════════════════╗
-║                    Reddit Parser v2.0                         ║
-║              Парсинг комментариев Reddit                      ║
-╚═══════════════════════════════════════════════════════════════╝
-{Colors.END}
-    """)
+    print(c('CYAN', c('BOLD', """
+============================================================
+                    Reddit Parser v2.0
+              Парсинг комментариев Reddit
+============================================================
+    """)))
 
 
 def print_menu():
     """Выводит главное меню"""
-    print(f"""
-{Colors.BLUE}Выберите режим работы:{Colors.END}
-
-    {Colors.GREEN}1){Colors.END}  🔵 CLI интерфейс
-           - Работа в терминале
-           - Ввод API ключа и параметров вручную
-
-    {Colors.PURPLE}2){Colors.END}  🟣 Web интерфейс
-           - Красивый веб-интерфейс
-           - Анимация и визуализация результатов
-           - Tailwind CSS
-
-    {Colors.RED}3){Colors.END}  ❌ Выход
-    """)
+    print(c('BLUE', 'Выберите режим работы:'))
+    print()
+    print(f"    {c('GREEN','1)')}  CLI интерфейс")
+    print("           - Работа в терминале")
+    print("           - Ввод API ключа и параметров вручную")
+    print()
+    print(f"    {c('PURPLE','2)')}  Web интерфейс")
+    print("           - Красивый веб-интерфейс")
+    print("           - Анимация и визуализация результатов")
+    print("           - Tailwind CSS")
+    print()
+    print(f"    {c('RED','3)')}  Выход")
+    print()
 
 
 def run_cli_interface():
     """Запускает CLI интерфейс для парсинга"""
-    print(f"\n{Colors.BLUE}{'='*60}")
+    print(c('BLUE', '\n' + '='*60))
     print("Запуск CLI интерфейса...")
-    print(f"{'='*60}{Colors.END}\n")
+    print('='*60 + '\n')
 
     # Импортируем модули парсера
     from main_parser import RedditParser, SentimentAnalyzer
@@ -66,13 +78,13 @@ def run_cli_interface():
     load_dotenv()
 
     # Шаг 1: Ввод API ключа
-    print(f"\n{Colors.YELLOW}Шаг 1: Настройка OpenRouter API{Colors.END}")
+    print(c('YELLOW', '\nШаг 1: Настройка OpenRouter API'))
     print("-" * 40)
     
     # Проверяем есть ли ключ в .env
     env_key = os.getenv("OPENROUTER_API_KEY")
     if env_key:
-        print(f"Найден ключ в .env файле: {Colors.GREEN}✓{Colors.END}")
+        print(f"Найден ключ в .env файле: {c('GREEN','OK')}")
         use_existing = input("Использовать существующий ключ? (y/n): ").strip().lower()
         if use_existing in ['y', 'yes', 'д', 'да']:
             api_key = env_key
@@ -92,7 +104,7 @@ def run_cli_interface():
     use_sentiment = api_key and input("\nВключить анализ тональности комментариев? (y/n): ").strip().lower() in ['y', 'yes', 'д', 'да']
 
     # Шаг 2: Выбор режима парсинга
-    print(f"\n{Colors.YELLOW}Шаг 2: Выбор режима парсинга{Colors.END}")
+    print(c('YELLOW', '\nШаг 2: Выбор режима парсинга'))
     print("-" * 40)
     print("1) Парсить последние посты сабреддита")
     print("2) Парсить конкретный пост по ссылке")
@@ -100,7 +112,7 @@ def run_cli_interface():
     parse_mode = input("Выберите режим (1/2): ").strip()
 
     # Шаг 3: Ввод параметров
-    print(f"\n{Colors.YELLOW}Шаг 3: Параметры парсинга{Colors.END}")
+    print(c('YELLOW', '\nШаг 3: Параметры парсинга'))
     print("-" * 40)
     
     target_comments = int(input("Количество комментариев для сбора (по умолчанию 100): ").strip() or "100")
@@ -114,12 +126,12 @@ def run_cli_interface():
     # Если есть API ключ, создаём SentimentAnalyzer
     if use_sentiment and api_key:
         parser.sentiment = SentimentAnalyzer(api_key=api_key, model=model)
-        print(f"{Colors.GREEN}✓{Colors.END} SentimentAnalyzer готов (модель: {model})")
+        print(f"{c('GREEN','OK')} SentimentAnalyzer готов (модель: {model})")
 
     # Запуск парсинга
-    print(f"\n{Colors.GREEN}{'='*60}")
+    print(c('GREEN', '\n' + '='*60))
     print("Начинаем парсинг...")
-    print(f"{'='*60}{Colors.END}\n")
+    print('='*60 + '\n')
 
     if parse_mode == "1":
         # Парсинг сабреддита
@@ -149,106 +161,92 @@ def run_cli_interface():
 
     # Вывод результатов
     if not df.empty:
-        print(f"\n{Colors.GREEN}{'='*60}")
+        print(c('GREEN', '\n' + '='*60))
         print(f"Парсинг завершён! Собрано {len(df)} уникальных пользователей")
-        print(f"{'='*60}{Colors.END}")
+        print('='*60)
         
         stats = parser.get_stats()
         print("\n--- Статистика ---")
         for k, v in stats.items():
             print(f"  {k}: {v}")
     else:
-        print(f"\n{Colors.RED}Данные не собраны{Colors.END}")
+        print(c('RED', '\nДанные не собраны'))
 
     input("\nНажмите Enter для продолжения...")
 
 
 def run_web_interface():
     """Запускает Web интерфейс"""
-    print(f"\n{Colors.PURPLE}{'='*60}")
+    print(c('PURPLE', '\n' + '='*60))
     print("Запуск Web интерфейса...")
-    print(f"{'='*60}{Colors.END}\n")
+    print('='*60 + '\n')
 
-    # Проверяем Node.js с shell=True для Windows
-    try:
-        result = subprocess.run(
-            "node --version",
-            capture_output=True,
-            text=True,
-            shell=True
-        )
-        if result.returncode != 0:
-            raise FileNotFoundError("Node.js not found")
-        node_version = result.stdout.strip()
-        print(f"{Colors.GREEN}✓{Colors.END} Node.js версия: {node_version}")
-    except FileNotFoundError:
-        print(f"{Colors.RED}Ошибка: Node.js не найден{Colors.END}")
-        print("Пожалуйста, установите Node.js с сайта https://nodejs.org/")
-        input("Нажмите Enter для выхода...")
-        return
-
-    # Проверяем директорию сервера
+    # Проверяем установлены ли зависимости Node.js
     web_server_dir = Path(__file__).parent / "web-server"
     
     # Установка зависимостей Node.js если нужно
-    print("\nПроверка зависимостей Node.js...")
+    print("Проверка зависимостей Node.js...")
     if not (web_server_dir / "node_modules").exists():
         print("Установка зависимостей Node.js...")
         try:
             subprocess.run(
-                "npm install",
+                ["npm", "install"],
                 cwd=str(web_server_dir),
                 check=True,
-                capture_output=True,
-                shell=True
+                capture_output=True
             )
-            print(f"{Colors.GREEN}✓{Colors.END} Зависимости установлены")
+            print(c('GREEN', 'OK') + " Зависимости установлены")
         except subprocess.CalledProcessError as e:
-            print(f"{Colors.RED}Ошибка установки зависимостей:{Colors.END}")
+            print(c('RED', 'Ошибка установки зависимостей:'))
             print(e.stderr.decode() if e.stderr else str(e))
             input("Нажмите Enter для выхода...")
             return
         except FileNotFoundError:
-            print(f"{Colors.RED}Ошибка: npm не найден{Colors.END}")
+            print(c('RED', 'Ошибка: npm не найден.'))
+            print("Пожалуйста, установите Node.js с сайта https://nodejs.org/")
             input("Нажмите Enter для выхода...")
             return
 
     # Запуск Node.js сервера
     print("\nЗапуск веб-сервера...")
-    print(f"{Colors.YELLOW}Сервер запускается на http://localhost:3000{Colors.END}")
+    print(c('YELLOW', 'Сервер запускается на http://localhost:3000'))
     
     try:
+        # Запускаем сервер
         server_process = subprocess.Popen(
-            "node server.js",
+            ["node", "server.js"],
             cwd=str(web_server_dir),
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=True
+            stderr=subprocess.PIPE
         )
         
         # Ждём запуска сервера
         time.sleep(2)
         
         # Открываем браузер
-        print(f"\n{Colors.GREEN}Открытие браузера...{Colors.END}")
+        print(c('GREEN', '\nОткрытие браузера...'))
         webbrowser.open("http://localhost:3000")
         
-        print(f"\n{Colors.CYAN}{'='*60}")
+        print(c('CYAN', '\n' + '='*60))
         print("Web интерфейс запущен!")
         print(f"Откройте в браузере: http://localhost:3000")
-        print(f"{'='*60}{Colors.END}")
-        print(f"\n{Colors.YELLOW}Нажмите Ctrl+C для остановки сервера{Colors.END}")
+        print('='*60)
+        print(c('YELLOW', '\nНажмите Ctrl+C для остановки сервера'))
         
         # Ждём пока сервер работает
         try:
             server_process.wait()
         except KeyboardInterrupt:
-            print(f"\n{Colors.RED}Остановка сервера...{Colors.END}")
+            print(c('RED', '\nОстановка сервера...'))
             server_process.terminate()
             server_process.wait()
             
+    except FileNotFoundError:
+        print(c('RED', 'Ошибка: node не найден.'))
+        print("Пожалуйста, установите Node.js с сайта https://nodejs.org/")
+        input("Нажмите Enter для выхода...")
     except Exception as e:
-        print(f"{Colors.RED}Ошибка запуска сервера:{Colors.END} {e}")
+        print(c('RED', f'Ошибка запуска сервера: {e}'))
         input("Нажмите Enter для выхода...")
 
 
@@ -258,22 +256,23 @@ def main():
         print_header()
         print_menu()
         
-        choice = input(f"\n{Colors.BOLD}Ваш выбор:{Colors.END} ").strip()
+        choice = input(c('BOLD', '\nВаш выбор: ')).strip()
         
         if choice == "1":
             run_cli_interface()
         elif choice == "2":
             run_web_interface()
+            # После запуска веб-интерфейса возвращаемся в меню
             input("\nНажмите Enter для возврата в меню...")
         elif choice == "3" or choice.lower() in ['exit', 'quit', 'выход', 'q']:
-            print(f"\n{Colors.CYAN}До свидания!{Colors.END}\n")
+            print(c('CYAN', '\nДо свидания!\n'))
             break
         else:
-            print(f"\n{Colors.RED}Неверный выбор. Попробуйте снова.{Colors.END}")
+            print(c('RED', '\nНеверный выбор. Попробуйте снова.'))
             time.sleep(1)
 
 
 if __name__ == "__main__":
+    # Добавляем текущую директорию в путь
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     main()
-

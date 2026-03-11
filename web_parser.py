@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Web Parser - запускается из Node.js сервера для парсинга Reddit
 """
 import sys
 import os
+
+# Fix Windows encoding
+if sys.platform == 'win32':
+    try:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import json
 import argparse
 import pandas as pd
@@ -12,14 +23,77 @@ import requests
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 
-# Добавляем текущую директорию в путь для импорта
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# === Bot Detection Logic (Improved) ===
+def is_bot(user_karma: int, account_age_days: float, reply_delay_seconds: int, 
+           sentiment_score: Optional[float], comment_text: str = "", comment_score: int = 0) -> bool:
+    """
+    Improved bot detection based on multiple factors
+    """
+    bot_score = 0
+    human_score = 0
+    
+    # SUSPICIOUS FACTORS
+    if account_age_days and account_age_days < 7:
+        bot_score += 5
+    elif account_age_days and account_age_days < 30:
+        bot_score += 2
+    
+    if user_karma < 10:
+        bot_score += 4
+    elif user_karma < 50:
+        bot_score += 2
+    elif user_karma < 100:
+        bot_score += 1
+    
+    if reply_delay_seconds < 5:
+        bot_score += 5
+    elif reply_delay_seconds < 15:
+        bot_score += 3
+    elif reply_delay_seconds < 30:
+        bot_score += 1
+    
+    if comment_score < 0:
+        bot_score += 3
+    
+    if comment_text and len(comment_text) < 20:
+        bot_score += 2
+    
+    # HUMAN FACTORS
+    if account_age_days and account_age_days > 365:
+        human_score += 3
+    elif account_age_days and account_age_days > 180:
+        human_score += 2
+    elif account_age_days and account_age_days > 60:
+        human_score += 1
+    
+    if user_karma > 1000:
+        human_score += 3
+    elif user_karma > 500:
+        human_score += 2
+    elif user_karma > 100:
+        human_score += 1
+    
+    if 60 <= reply_delay_seconds <= 3600:
+        human_score += 2
+    elif 30 <= reply_delay_seconds <= 86400:
+        human_score += 1
+    
+    if comment_score > 10:
+        human_score += 2
+    elif comment_score > 0:
+        human_score += 1
+    
+    if comment_text and len(comment_text) > 100:
+        human_score += 2
+    elif comment_text and len(comment_text) > 50:
+        human_score += 1
+    
+    return bot_score > human_score + 2
+
 
 # === OpenRouter Sentiment Analyzer ===
 
 class SentimentAnalyzer:
-    """Оценивает тональность комментария через OpenRouter API."""
-    
     BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
     
     PROMPT_TEMPLATE = """You are a sentiment analysis engine.
@@ -41,6 +115,7 @@ Comment:
         self.model = model
         self.interval = min_request_interval
         self._last_call = 0.0
+        self.request_count = 0
 
     def _wait(self):
         elapsed = time.time() - self._last_call
@@ -49,9 +124,12 @@ Comment:
         self._last_call = time.time()
 
     def score(self, comment_text: str, username: str = "unknown", max_retries: int = 3) -> Optional[float]:
-        """Возвращает float sentiment_score или None при ошибке."""
         if not self.api_key:
             return None
+        
+        self.request_count += 1
+        if self.request_count % 10 == 0:
+            print(f"  [SENTIMENT] Processed {self.request_count} comments...")
             
         prompt = self.PROMPT_TEMPLATE.format(
             username=username,
@@ -77,7 +155,10 @@ Comment:
                 raw = (resp.json()["choices"][0]["message"]["content"].strip().replace(",", "."))
                 return max(-1.0, min(1.0, float(raw)))
             except (ValueError, KeyError, Exception):
-                return None
+                if attempt == max_retries - 1:
+                    pass
+                wait = 2 ** attempt
+                time.sleep(wait)
 
         return None
 
@@ -85,8 +166,6 @@ Comment:
 # === Reddit Parser ===
 
 class RedditParser:
-    """Reddit comment parser for web interface."""
-    
     def __init__(self, user_agent: str = "RedditParserWeb/1.0", run_sentiment: bool = True):
         self.collected_data: List[Dict] = []
         self.processed_users: set = set()
@@ -101,10 +180,9 @@ class RedditParser:
         self.sentiment = None
 
     def set_sentiment(self, api_key: str, model: str):
-        """Установить анализатор тональности."""
         if api_key:
             self.sentiment = SentimentAnalyzer(api_key=api_key, model=model)
-            print(f"✓ SentimentAnalyzer готов (модель: {model})")
+            print(f"[OK] SentimentAnalyzer ready (model: {model})")
 
     def _rate_limit(self):
         elapsed = time.time() - self.last_request_time
@@ -241,10 +319,10 @@ class RedditParser:
                          post_time: float, post_title: Optional[str] = None,
                          post_url: Optional[str] = None,
                          target_comments: int = 700) -> bool:
-        """Обрабатывает комментарии поста."""
         for comment in comments:
             author = comment.get("author")
             body = comment.get("body", "").strip()
+            comment_score = comment.get("score", 0)
 
             if (not author or author == post_author or
                     author == "[deleted]" or not body or
@@ -264,11 +342,20 @@ class RedditParser:
                 comment_created = comment.get("created_utc", 0)
                 reply_delay_secs = int(comment_created - post_time) if comment_created else 0
 
-                # Sentiment через OpenRouter
+                # Sentiment
                 sentiment_score = None
                 if self.run_sentiment and self.sentiment:
-                    print(f"  🔍 Sentiment для @{author}...")
                     sentiment_score = self.sentiment.score(body, username=author)
+
+                # Bot detection
+                is_bot_user = is_bot(
+                    user_karma, 
+                    account_age_days, 
+                    reply_delay_secs, 
+                    sentiment_score,
+                    comment_text=body,
+                    comment_score=comment_score
+                )
 
                 record = {
                     "reply_delay_seconds": reply_delay_secs,
@@ -278,7 +365,8 @@ class RedditParser:
                     "sentiment_score": sentiment_score,
                     "username": author,
                     "comment_id": comment.get("id", ""),
-                    "comment_score": comment.get("score", 0),
+                    "comment_score": comment_score,
+                    "is_bot": is_bot_user,
                 }
                 if post_title:
                     record["post_title"] = post_title
@@ -301,8 +389,8 @@ class RedditParser:
                        category: str = "hot", time_filter: str = "week",
                        target_comments: int = 100) -> pd.DataFrame:
         self.target_comments = target_comments
-        print(f"Отправляем POST-запросы к Reddit API...")
-        print(f"Парсим сабреддит: r/{subreddit_name}")
+        print("Sending POST requests to Reddit API...")
+        print(f"Parsing subreddit: r/{subreddit_name}")
         
         posts = self.fetch_subreddit_posts(
             subreddit_name, limit=posts_limit,
@@ -312,8 +400,8 @@ class RedditParser:
             print("No posts found")
             return pd.DataFrame()
 
-        print(f"Найдено {len(posts)} постов")
-        print(f"Парсим комментарии...")
+        print(f"Found {len(posts)} posts")
+        print("Parsing comments...")
 
         for i, post in enumerate(posts, 1):
             title = post.get("title", "")[:60]
@@ -330,35 +418,42 @@ class RedditParser:
             post_url = post.get("permalink", "")
             comments = post_details.get("comments", [])
 
-            print(f"  Найдено {len(comments)} комментариев")
+            print(f"  Found {len(comments)} comments")
             
             if self.sentiment:
-                print("Анализируем тональность...")
+                print("Analyzing sentiment...")
             
             should_cont = self.process_comments(
                 comments, post_author, post_time,
                 post_title, post_url
             )
-            print(f"  Добавлено: {len(self.collected_data)}")
+            print(f"  Added: {len(self.collected_data)}")
 
             if not should_cont:
                 break
 
         df = pd.DataFrame(self.collected_data)
-        print(f"\nПарсинг завершён! Собрано {len(df)} уникальных пользователей")
+        print(f"\nParsing complete! Collected {len(df)} unique users")
+        
+        if not df.empty and "is_bot" in df.columns:
+            bots = df["is_bot"].sum()
+            humans = len(df) - bots
+            print(f"Bots detected: {bots}")
+            print(f"Humans: {humans}")
+        
         return df
 
     def parse_post(self, post_url: str, target_comments: int = 100) -> pd.DataFrame:
         self.target_comments = target_comments
-        print(f"Отправляем POST-запросы к Reddit API...")
+        print("Sending POST requests to Reddit API...")
         
         if "reddit.com" in post_url:
             permalink = post_url.split("reddit.com")[1]
         else:
             permalink = post_url
 
-        print(f"Парсим пост: {post_url}")
-        print("Парсим комментарии...")
+        print(f"Parsing post: {post_url}")
+        print("Parsing comments...")
         
         post_details = self.scrape_post_details(permalink)
         if not post_details:
@@ -366,7 +461,7 @@ class RedditParser:
             return pd.DataFrame()
 
         if self.sentiment:
-            print("Анализируем тональность...")
+            print("Analyzing sentiment...")
             
         self.process_comments(
             post_details.get("comments", []),
@@ -378,11 +473,17 @@ class RedditParser:
         )
         
         df = pd.DataFrame(self.collected_data)
-        print(f"\nПарсинг завершён! Собрано {len(df)} уникальных пользователей")
+        print(f"\nParsing complete! Collected {len(df)} unique users")
+        
+        if not df.empty and "is_bot" in df.columns:
+            bots = df["is_bot"].sum()
+            humans = len(df) - bots
+            print(f"Bots detected: {bots}")
+            print(f"Humans: {humans}")
+        
         return df
 
     def save_results(self, filename: str = "web_results.json") -> str:
-        """Сохраняет результаты в JSON для веб-интерфейса."""
         result = {
             "total_users": len(self.collected_data),
             "timestamp": datetime.now().isoformat(),
@@ -392,11 +493,9 @@ class RedditParser:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
         
-        print(f"Сохранение данных в {filename}")
+        print(f"Saving data to {filename}")
         return filename
 
-
-# === Main ===
 
 def main():
     parser = argparse.ArgumentParser(description='Web Parser for Reddit')
@@ -409,14 +508,11 @@ def main():
     
     args = parser.parse_args()
     
-    # Создаём парсер
     p = RedditParser(run_sentiment=bool(args.api_key))
     
-    # Устанавливаем sentiment analyzer если есть ключ
     if args.api_key:
         p.set_sentiment(args.api_key, args.model)
     
-    # Запускаем парсинг
     if args.mode == 'subreddit':
         df = p.parse_subreddit(
             args.subreddit,
@@ -428,11 +524,9 @@ def main():
             target_comments=args.target
         )
     
-    # Сохраняем результаты
     if not df.empty:
         p.save_results()
 
 
 if __name__ == "__main__":
     main()
-
