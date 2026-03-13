@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Reddit Parser - CLI и Web интерфейс для парсинга комментариев Reddit
+Reddit Parser - CLI интерфейс для парсинга комментариев Reddit
 """
 import os
 import sys
@@ -16,7 +16,6 @@ if sys.platform == 'win32':
         pass
 
 import subprocess
-import webbrowser
 import time
 from pathlib import Path
 
@@ -55,13 +54,9 @@ def print_menu():
     print("           - Работа в терминале")
     print("           - Ввод API ключа и параметров вручную")
     print()
-    print(f"    {c('PURPLE','2)')}  Web интерфейс")
-    print("           - Красивый веб-интерфейс")
-    print("           - Анимация и визуализация результатов")
-    print("           - Tailwind CSS")
+    print(f"    {c('RED','2)')}  Выход")
     print()
-    print(f"    {c('RED','3)')}  Выход")
-    print()
+    return(int(input("Режим: ")))
 
 
 def run_cli_interface():
@@ -174,105 +169,10 @@ def run_cli_interface():
 
     input("\nНажмите Enter для продолжения...")
 
-
-def run_web_interface():
-    """Запускает Web интерфейс"""
-    print(c('PURPLE', '\n' + '='*60))
-    print("Запуск Web интерфейса...")
-    print('='*60 + '\n')
-
-    # Проверяем установлены ли зависимости Node.js
-    web_server_dir = Path(__file__).parent / "web-server"
-    
-    # Установка зависимостей Node.js если нужно
-    print("Проверка зависимостей Node.js...")
-    if not (web_server_dir / "node_modules").exists():
-        print("Установка зависимостей Node.js...")
-        try:
-            subprocess.run(
-                ["npm", "install"],
-                cwd=str(web_server_dir),
-                check=True,
-                capture_output=True
-            )
-            print(c('GREEN', 'OK') + " Зависимости установлены")
-        except subprocess.CalledProcessError as e:
-            print(c('RED', 'Ошибка установки зависимостей:'))
-            print(e.stderr.decode() if e.stderr else str(e))
-            input("Нажмите Enter для выхода...")
-            return
-        except FileNotFoundError:
-            print(c('RED', 'Ошибка: npm не найден.'))
-            print("Пожалуйста, установите Node.js с сайта https://nodejs.org/")
-            input("Нажмите Enter для выхода...")
-            return
-
-    # Запуск Node.js сервера
-    print("\nЗапуск веб-сервера...")
-    print(c('YELLOW', 'Сервер запускается на http://localhost:3000'))
-    
-    try:
-        # Запускаем сервер
-        server_process = subprocess.Popen(
-            ["node", "server.js"],
-            cwd=str(web_server_dir),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        
-        # Ждём запуска сервера
-        time.sleep(2)
-        
-        # Открываем браузер
-        print(c('GREEN', '\nОткрытие браузера...'))
-        webbrowser.open("http://localhost:3000")
-        
-        print(c('CYAN', '\n' + '='*60))
-        print("Web интерфейс запущен!")
-        print(f"Откройте в браузере: http://localhost:3000")
-        print('='*60)
-        print(c('YELLOW', '\nНажмите Ctrl+C для остановки сервера'))
-        
-        # Ждём пока сервер работает
-        try:
-            server_process.wait()
-        except KeyboardInterrupt:
-            print(c('RED', '\nОстановка сервера...'))
-            server_process.terminate()
-            server_process.wait()
-            
-    except FileNotFoundError:
-        print(c('RED', 'Ошибка: node не найден.'))
-        print("Пожалуйста, установите Node.js с сайта https://nodejs.org/")
-        input("Нажмите Enter для выхода...")
-    except Exception as e:
-        print(c('RED', f'Ошибка запуска сервера: {e}'))
-        input("Нажмите Enter для выхода...")
-
-
-def main():
-    """Главная функция"""
-    while True:
-        print_header()
-        print_menu()
-        
-        choice = input(c('BOLD', '\nВаш выбор: ')).strip()
-        
-        if choice == "1":
-            run_cli_interface()
-        elif choice == "2":
-            run_web_interface()
-            # После запуска веб-интерфейса возвращаемся в меню
-            input("\nНажмите Enter для возврата в меню...")
-        elif choice == "3" or choice.lower() in ['exit', 'quit', 'выход', 'q']:
-            print(c('CYAN', '\nДо свидания!\n'))
-            break
-        else:
-            print(c('RED', '\nНеверный выбор. Попробуйте снова.'))
-            time.sleep(1)
-
-
 if __name__ == "__main__":
     # Добавляем текущую директорию в путь
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    main()
+    print_header()
+    mode = print_menu()
+    if mode == 1:
+        run_cli_interface()
