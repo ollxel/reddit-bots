@@ -613,3 +613,4 @@ def get_stats(self) -> Dict[str, Any]:
             stats[f"median_{col}"] = df[col].median()
 
     return stats
+```
