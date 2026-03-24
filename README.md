@@ -48,6 +48,6 @@ python3 main.py
 
 For quick access to the tool, you can use alias:
 
-'''bash
+```bash
 alias reddit-bots="python3 ~/path/to/directory/reddit-bots/main.py"
 ```
