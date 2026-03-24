@@ -45,3 +45,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python3 main.py
 ```
+
+For quick access to the tool, you can use alias:
+
+'''bash
+alias reddit-bots="python3 ~/path/to/directory/reddit-bots/main.py"
+```
