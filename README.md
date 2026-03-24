@@ -25,6 +25,7 @@ reddit-bots/
 │       └── cli.py
 ├── requirements.txt
 ├── reddit_dead_internet_analysis_2026.csv
+├── image1.jpg
 ├── README.md
 └── README_RU.md
 ```
