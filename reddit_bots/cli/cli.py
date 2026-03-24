@@ -14,11 +14,30 @@ from reddit_bots.parser.reddit_parser import RedditParser, SentimentAnalyzer
 
 
 class RedditAccountAnalyzerCLI:
+    C = {
+        "RED": "\033[91m",
+        "SAND": "\033[93m",
+        "DIM": "\033[90m",
+        "BOLD": "\033[1m",
+        "END": "\033[0m",
+    }
+
     def __init__(self):
         load_dotenv()
         self.raw_comments_df: Optional[pd.DataFrame] = None
         self.account_features_df: Optional[pd.DataFrame] = None
         self.analysis_df: Optional[pd.DataFrame] = None
+
+    @classmethod
+    def _cx(cls, tone: str, text: str) -> str:
+        return f"{cls.C.get(tone, '')}{text}{cls.C['END']}"
+
+    @classmethod
+    def _section(cls, title: str) -> None:
+        line = "=" * 68
+        print("\n" + cls._cx("DIM", line))
+        print(cls._cx("RED", cls._cx("BOLD", title)))
+        print(cls._cx("DIM", line))
 
     @staticmethod
     def _ask_yes_no(prompt: str, default: bool = False) -> bool:
@@ -194,19 +213,62 @@ class RedditAccountAnalyzerCLI:
         print("\nSuspicious accounts:")
         print(filtered[["username", "comments_count", "bot_probability", "risk_level"]].head(50).to_string(index=False))
 
-    def run(self) -> None:
+    @staticmethod
+    def _print_mode_intro() -> None:
+        RedditAccountAnalyzerCLI._section("MODE SELECTION")
+        print(RedditAccountAnalyzerCLI._cx("RED", "1) Default mode"))
+        print(RedditAccountAnalyzerCLI._cx("SAND", "   Full pipeline: parse -> features -> analyzer -> report"))
+        print(RedditAccountAnalyzerCLI._cx("RED", "2) Advanced mode"))
+        print(RedditAccountAnalyzerCLI._cx("SAND", "   Separate steps with resume via CSV on another device"))
+        print(RedditAccountAnalyzerCLI._cx("RED", "3) Exit"))
+        print()
+        print(RedditAccountAnalyzerCLI._cx("SAND", "Tip: copy CSV output from one machine and continue from step 2/3/4."))
+
+    @staticmethod
+    def _print_advanced_help() -> None:
+        RedditAccountAnalyzerCLI._section("ADVANCED MODE HELP")
+        print(RedditAccountAnalyzerCLI._cx("RED", "Step 1 output:") + " parsed_comments.csv")
+        print(RedditAccountAnalyzerCLI._cx("RED", "Step 2 output:") + " account_features.csv")
+        print(RedditAccountAnalyzerCLI._cx("RED", "Step 3 output:") + " account_analysis.csv")
+        print(RedditAccountAnalyzerCLI._cx("SAND", "You can move these files and continue on another device."))
+
+    def run_default_mode(self) -> None:
+        self._section("DEFAULT MODE")
+        print(self._cx("SAND", "Full pipeline started."))
+        self._section("STAGE 1/4 - PARSE")
+        self.parse_subreddit()
+        if self.raw_comments_df is None or self.raw_comments_df.empty:
+            print("Pipeline stopped: no parsed comments.")
+            return
+
+        self._section("STAGE 2/4 - ACCOUNT FEATURES")
+        self.build_account_features()
+        if self.account_features_df is None or self.account_features_df.empty:
+            print("Pipeline stopped: account features were not built.")
+            return
+
+        self._section("STAGE 3/4 - ANALYZER")
+        self.run_analyzer()
+        if self.analysis_df is None or self.analysis_df.empty:
+            print("Pipeline stopped: analyzer did not produce output.")
+            return
+
+        self._section("STAGE 4/4 - SUSPICIOUS ACCOUNTS")
+        self.show_suspicious_accounts()
+        self._section("DEFAULT MODE COMPLETED")
+
+    def run_advanced_mode(self) -> None:
+        self._print_advanced_help()
         while True:
-            print("\n" + "=" * 60)
-            print("REDDIT ACCOUNT ANALYZER")
-            print("=" * 60)
-            print("1) Parse subreddit")
-            print("2) Build account features")
-            print("3) Run analyzer")
-            print("4) Show suspicious accounts")
-            print("5) Exit")
+            self._section("ADVANCED MODE")
+            print(self._cx("RED", "1) Parse subreddit") + self._cx("SAND", " (create parsed_comments.csv)"))
+            print(self._cx("RED", "2) Build account features") + self._cx("SAND", " (create account_features.csv)"))
+            print(self._cx("RED", "3) Run analyzer") + self._cx("SAND", " (create account_analysis.csv)"))
+            print(self._cx("RED", "4) Show suspicious accounts"))
+            print(self._cx("RED", "5) Help"))
+            print(self._cx("RED", "6) Back"))
 
             choice = input("Select option: ").strip()
-
             if choice == "1":
                 self.parse_subreddit()
             elif choice == "2":
@@ -216,10 +278,25 @@ class RedditAccountAnalyzerCLI:
             elif choice == "4":
                 self.show_suspicious_accounts()
             elif choice == "5":
+                self._print_advanced_help()
+            elif choice == "6":
+                break
+            else:
+                print("Unknown option. Choose 1-6.")
+
+    def run(self) -> None:
+        while True:
+            self._print_mode_intro()
+            mode = input("Select mode: ").strip()
+            if mode == "1":
+                self.run_default_mode()
+            elif mode == "2":
+                self.run_advanced_mode()
+            elif mode == "3":
                 print("Bye.")
                 break
             else:
-                print("Unknown option. Choose 1-5.")
+                print("Unknown option. Choose 1-3.")
 
 
 def run_cli() -> None:

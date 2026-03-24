@@ -35,30 +35,24 @@ def print_header() -> None:
     os.system("cls" if os.name == "nt" else "clear")
     print(
         c(
-            "CYAN",
+            "RED",
             c(
                 "BOLD",
-                """
-                Reddit Account Analyzer
-      Behavioral Analysis of Reddit Accounts
+"""
+______ _________________ _____ _____     ______  _____ _____ _____ 
+| ___ \  ___|  _  \  _  \_   _|_   _|    | ___ \|  _  |_   _/  ___|
+| |_/ / |__ | | | | | | | | |   | |______| |_/ /| | | | | | \ `--. 
+|    /|  __|| | | | | | | | |   | |______| ___ \| | | | | |  `--. |
+| |\ \| |___| |/ /| |/ / _| |_  | |      | |_/ /\ \_/ / | | /\__/ /
+\_| \_\____/|___/ |___/  \___/  \_/      \____/  \___/  \_/ \____/                                                            
+
+
+REDDIT-BOTS
+Behavioral Reddit Account Analyzer
 """,
             ),
         )
     )
-
-
-def print_menu() -> int:
-    print(c("BLUE", "Select mode:"))
-    print()
-    print(f"  {c('GREEN', '1)')} CLI interface")
-    print(f"  {c('RED', '2)')} Exit")
-    print()
-
-    raw = input("Mode: ").strip() or "1"
-    try:
-        return int(raw)
-    except ValueError:
-        return 1
 
 
 def run_cli_interface() -> None:
@@ -68,6 +62,4 @@ def run_cli_interface() -> None:
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     print_header()
-    mode = print_menu()
-    if mode == 1:
-        run_cli_interface()
+    run_cli_interface()
