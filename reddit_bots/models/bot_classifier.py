@@ -1,0 +1,222 @@
+"""Account-level bot risk model and reporting utilities."""
+
+from __future__ import annotations
+
+import os
+from typing import List, Optional, Tuple
+
+import matplotlib.pyplot as plt
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+
+from reddit_bots.analysis.account_features import build_account_features
+from reddit_bots.analysis.behavior_metrics import normalize_label
+
+
+ACCOUNT_FEATURES: List[str] = [
+    "comments_count",
+    "avg_reply_delay",
+    "reply_delay_std",
+    "avg_comment_score",
+    "comment_score_std",
+    "avg_comment_length",
+    "sentiment_mean",
+    "sentiment_std",
+    "activity_span_days",
+    "posts_per_day",
+    "burstiness_score",
+]
+
+
+class AccountBotClassifier:
+    """Train and run bot-risk scoring on account-level features."""
+
+    def __init__(self, n_estimators: int = 300, random_state: int = 42):
+        self.n_estimators = n_estimators
+        self.random_state = random_state
+        self.model: Optional[RandomForestClassifier] = None
+
+    def _ensure_feature_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        fixed = df.copy()
+        for column in ACCOUNT_FEATURES:
+            if column not in fixed.columns:
+                fixed[column] = 0.0
+        return fixed
+
+    def prepare_training_data(self, training_csv_path: str) -> Tuple[pd.DataFrame, pd.Series]:
+        data = pd.read_csv(training_csv_path)
+
+        if "is_bot_flag" not in data.columns:
+            raise ValueError("Training file must contain 'is_bot_flag' column.")
+
+        if "username" not in data.columns:
+            data["username"] = [f"train_user_{idx}" for idx in range(len(data))]
+
+        if not set(ACCOUNT_FEATURES).issubset(data.columns):
+            account_df = build_account_features(data)
+        else:
+            account_df = data.copy()
+
+        if "is_bot_flag" not in account_df.columns:
+            merged = data[["username", "is_bot_flag"]].copy()
+            merged["is_bot_flag"] = merged["is_bot_flag"].apply(normalize_label)
+            merged = (
+                merged.groupby("username", as_index=False)["is_bot_flag"]
+                .mean()
+                .assign(is_bot_flag=lambda df_: (df_["is_bot_flag"] >= 0.5).astype(int))
+            )
+            account_df = account_df.merge(merged, on="username", how="left")
+
+        account_df["is_bot_flag"] = account_df["is_bot_flag"].apply(normalize_label)
+        account_df = self._ensure_feature_columns(account_df)
+
+        X = account_df[ACCOUNT_FEATURES].fillna(0.0)
+        y = account_df["is_bot_flag"].astype(int)
+        return X, y
+
+    def train(self, training_csv_path: str) -> RandomForestClassifier:
+        X, y = self.prepare_training_data(training_csv_path)
+
+        stratify = y if y.nunique() > 1 else None
+        X_train, X_test, y_train, y_test = train_test_split(
+            X,
+            y,
+            test_size=0.2,
+            random_state=self.random_state,
+            stratify=stratify,
+        )
+
+        self.model = RandomForestClassifier(
+            n_estimators=self.n_estimators,
+            random_state=self.random_state,
+            n_jobs=-1,
+        )
+        self.model.fit(X_train, y_train)
+
+        y_pred = self.model.predict(X_test)
+        print("\n" + "=" * 60)
+        print("ACCOUNT MODEL TRAINING REPORT")
+        print("=" * 60)
+        print(classification_report(y_test, y_pred, zero_division=0))
+        print("Confusion Matrix:")
+        print(confusion_matrix(y_test, y_pred))
+
+        importances = pd.Series(self.model.feature_importances_, index=ACCOUNT_FEATURES)
+        print("\nFeature importances:")
+        for feature, value in importances.sort_values(ascending=False).items():
+            print(f"  {feature:<22} {value:.4f}")
+
+        return self.model
+
+    @staticmethod
+    def _risk_level(probability: float) -> str:
+        if probability < 0.3:
+            return "likely human"
+        if probability < 0.6:
+            return "suspicious"
+        return "likely bot"
+
+    def predict(self, account_features_df: pd.DataFrame) -> pd.DataFrame:
+        if self.model is None:
+            raise RuntimeError("Model is not trained. Call train() first.")
+
+        data = self._ensure_feature_columns(account_features_df)
+        X = data[ACCOUNT_FEATURES].fillna(0.0)
+
+        probabilities = self.model.predict_proba(X)
+        bot_probability = probabilities[:, 1] if probabilities.shape[1] > 1 else probabilities[:, 0]
+
+        result = data.copy()
+        result["bot_probability"] = bot_probability
+        result["risk_level"] = result["bot_probability"].apply(self._risk_level)
+
+        output_cols = ["username", "comments_count", "bot_probability", "risk_level"]
+        for column in output_cols:
+            if column not in result.columns:
+                result[column] = 0
+
+        ordered = result.sort_values("bot_probability", ascending=False).reset_index(drop=True)
+        return ordered
+
+    def run_analysis(
+        self,
+        account_features_df: pd.DataFrame,
+        output_csv_path: str = "account_analysis.csv",
+    ) -> pd.DataFrame:
+        result = self.predict(account_features_df)
+        result.to_csv(output_csv_path, index=False)
+        print(f"Account analysis saved to '{output_csv_path}'")
+        return result
+
+    @staticmethod
+    def show_suspicious_accounts(
+        analysis_df: pd.DataFrame,
+        min_probability: float = 0.3,
+        top_n: int = 20,
+    ) -> pd.DataFrame:
+        filtered = analysis_df[analysis_df["bot_probability"] >= min_probability].copy()
+        filtered = filtered.sort_values("bot_probability", ascending=False).head(top_n)
+        return filtered
+
+
+def plot_distributions(
+    comments_df: Optional[pd.DataFrame],
+    account_features_df: pd.DataFrame,
+    analysis_df: pd.DataFrame,
+    output_dir: str = ".",
+) -> List[str]:
+    """Generate optional histograms and return saved image paths."""
+    os.makedirs(output_dir, exist_ok=True)
+    generated_paths: List[str] = []
+
+    if "comments_count" in account_features_df.columns:
+        plt.figure(figsize=(8, 5))
+        account_features_df["comments_count"].dropna().hist(bins=30)
+        plt.title("Distribution of Comment Counts")
+        plt.xlabel("comments_count")
+        plt.ylabel("accounts")
+        path = os.path.join(output_dir, "comment_count_distribution.png")
+        plt.tight_layout()
+        plt.savefig(path)
+        plt.close()
+        generated_paths.append(path)
+
+    if comments_df is not None and "reply_delay_seconds" in comments_df.columns:
+        plt.figure(figsize=(8, 5))
+        comments_df["reply_delay_seconds"].dropna().clip(upper=86400).hist(bins=40)
+        plt.title("Reply Delay Histogram")
+        plt.xlabel("reply_delay_seconds (capped at 86400)")
+        plt.ylabel("comments")
+        path = os.path.join(output_dir, "reply_delay_histogram.png")
+        plt.tight_layout()
+        plt.savefig(path)
+        plt.close()
+        generated_paths.append(path)
+
+    if comments_df is not None and "sentiment_score" in comments_df.columns:
+        plt.figure(figsize=(8, 5))
+        comments_df["sentiment_score"].dropna().hist(bins=30, range=(-1, 1))
+        plt.title("Sentiment Distribution")
+        plt.xlabel("sentiment_score")
+        plt.ylabel("comments")
+        path = os.path.join(output_dir, "sentiment_distribution.png")
+        plt.tight_layout()
+        plt.savefig(path)
+        plt.close()
+        generated_paths.append(path)
+
+    if "bot_probability" in analysis_df.columns:
+        plt.figure(figsize=(8, 5))
+        analysis_df["bot_probability"].dropna().hist(bins=30, range=(0, 1))
+        plt.title("Bot Probability Histogram")
+        plt.xlabel("bot_probability")
+        plt.ylabel("accounts")
+        path = os.path.join(output_dir, "bot_probability_histogram.png")
+        plt.tight_layout()
+        plt.savefig(path)
+        plt.close()
+        generated_paths.append(path)
+
+    return generated_paths
