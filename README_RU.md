@@ -2,7 +2,7 @@
 
 [English README](README.md) | [Русский README](README_RU.md)
 
-!(image1.png)
+![](image1.png)
 
 `REDDIT-BOTS` — компактный CLI-инструмент для анализа риска Reddit-аккаунтов.
 Он парсит комментарии, строит поведенческие признаки на уровне аккаунта и оценивает подозрительность (`bot_probability`).
