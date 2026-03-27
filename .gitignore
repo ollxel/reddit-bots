@@ -1,4 +1,8 @@
 .env
 .DS_Store
-/reddit_bots/.DS_Store
-/reddit_boys/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
