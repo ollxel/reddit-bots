@@ -13,6 +13,7 @@ It parses comments, builds account-level behavior features, and estimates suspic
 reddit-bots/
 ├── main.py
 ├── main_parser.py
+├── reddit_plots.py
 ├── reddit_bots/
 │   ├── parser/
 │   │   └── reddit_parser.py
