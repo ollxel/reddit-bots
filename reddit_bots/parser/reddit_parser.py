@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import requests
@@ -209,6 +209,8 @@ class RedditParser:
         for attempt in range(max_retries):
             try:
                 response = self.session.get(url, params=params, timeout=10)
+                if response.status_code in {403, 404}:
+                    return None
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After", 60))
                     print(f"Rate limited. Waiting {retry_after}s...")
@@ -224,6 +226,13 @@ class RedditParser:
                 print(f"Request failed, retrying in {wait}s...")
                 time.sleep(wait)
         return None
+
+    @staticmethod
+    def _parse_date_boundary(date_text: str, end_of_day: bool = False) -> float:
+        parsed = datetime.strptime(date_text.strip(), "%Y-%m-%d")
+        if end_of_day:
+            parsed = parsed + timedelta(days=1) - timedelta(seconds=1)
+        return parsed.replace(tzinfo=timezone.utc).timestamp()
 
     def get_user_info(self, username: str) -> Dict[str, Any]:
         if username in self.user_cache:
@@ -292,13 +301,90 @@ class RedditParser:
             )
         return posts
 
+    def fetch_subreddit_posts_by_date_range(
+        self,
+        subreddit_name: str,
+        start_date: str,
+        end_date: str,
+        category: str = "new",
+        max_batches: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetches posts in a subreddit for the inclusive date range [start_date, end_date].
+        Date format: YYYY-MM-DD (UTC).
+        """
+        start_ts = self._parse_date_boundary(start_date, end_of_day=False)
+        end_ts = self._parse_date_boundary(end_date, end_of_day=True)
+        if end_ts < start_ts:
+            raise ValueError("end_date must be >= start_date")
+
+        if category not in {"new", "hot", "top", "rising"}:
+            category = "new"
+
+        url = f"https://www.reddit.com/r/{subreddit_name}/{category}.json"
+        posts: List[Dict[str, Any]] = []
+        after: Optional[str] = None
+
+        for _ in range(max_batches):
+            params: Dict[str, Any] = {"limit": 100}
+            if after:
+                params["after"] = after
+            if category == "top":
+                params["t"] = "all"
+
+            data = self._make_request(url, params=params)
+            if not data or "data" not in data:
+                break
+
+            children = data["data"].get("children", [])
+            if not children:
+                break
+
+            stop_due_to_old = False
+            for child in children:
+                if child.get("kind") != "t3":
+                    continue
+
+                post_data = child.get("data", {})
+                created_utc = float(post_data.get("created_utc", 0) or 0)
+
+                if created_utc > end_ts:
+                    continue
+                if created_utc < start_ts:
+                    if category == "new":
+                        stop_due_to_old = True
+                    continue
+
+                posts.append(
+                    {
+                        "title": post_data.get("title", ""),
+                        "author": post_data.get("author", ""),
+                        "permalink": post_data.get("permalink", ""),
+                        "created_utc": created_utc,
+                        "score": post_data.get("score", 0),
+                        "num_comments": post_data.get("num_comments", 0),
+                        "id": post_data.get("id", ""),
+                        "subreddit": post_data.get("subreddit", subreddit_name),
+                    }
+                )
+
+            after = data["data"].get("after")
+            if not after or (stop_due_to_old and category == "new"):
+                break
+
+        posts.sort(key=lambda item: item.get("created_utc", 0))
+        return posts
+
     def _extract_comments(
         self,
         comments_data: List[Dict[str, Any]],
         all_comments: Optional[List[Dict[str, Any]]] = None,
-    ) -> List[Dict[str, Any]]:
+        more_ids: Optional[List[str]] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
         if all_comments is None:
             all_comments = []
+        if more_ids is None:
+            more_ids = []
 
         for item in comments_data:
             if not isinstance(item, dict):
@@ -324,19 +410,118 @@ class RedditParser:
                     self._extract_comments(
                         replies["data"].get("children", []),
                         all_comments,
+                        more_ids,
                     )
 
+            elif kind == "more":
+                children_ids = data.get("children", [])
+                if isinstance(children_ids, list):
+                    more_ids.extend([item_id for item_id in children_ids if isinstance(item_id, str)])
+
             elif kind == "Listing":
-                self._extract_comments(data.get("children", []), all_comments)
+                self._extract_comments(data.get("children", []), all_comments, more_ids)
 
-        return all_comments
+        return all_comments, more_ids
 
-    def scrape_post_details(self, permalink: str) -> Optional[Dict[str, Any]]:
+    def _fetch_morechildren_comments(
+        self,
+        post_id: str,
+        child_ids: List[str],
+        sort: str = "new",
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        if not post_id or not child_ids:
+            return []
+
+        url = "https://www.reddit.com/api/morechildren.json"
+        queue: List[str] = list(child_ids)
+        seen: Set[str] = set(queue)
+        collected: List[Dict[str, Any]] = []
+
+        while queue:
+            if limit is not None and len(collected) >= limit:
+                break
+
+            chunk = queue[:100]
+            queue = queue[100:]
+
+            params = {
+                "api_type": "json",
+                "link_id": f"t3_{post_id}",
+                "children": ",".join(chunk),
+                "sort": sort,
+            }
+            data = self._make_request(url, params=params, max_retries=2)
+            if not data:
+                continue
+
+            things = data.get("json", {}).get("data", {}).get("things", [])
+            comments, nested_more = self._extract_comments(things, all_comments=[], more_ids=[])
+            collected.extend(comments)
+
+            for more_id in nested_more:
+                if more_id not in seen:
+                    seen.add(more_id)
+                    queue.append(more_id)
+
+        if limit is not None:
+            return collected[:limit]
+        return collected
+
+    def _collect_post_comments(
+        self,
+        post_details: Dict[str, Any],
+        comments_limit: Optional[int] = None,
+        sort: str = "new",
+    ) -> List[Dict[str, Any]]:
+        base_comments = list(post_details.get("comments", []))
+        more_ids = list(post_details.get("more_comment_ids", []))
+        post_id = post_details.get("id", "")
+
+        if comments_limit is not None and comments_limit <= 0:
+            return []
+
+        if comments_limit is None:
+            remaining = None
+        else:
+            remaining = max(0, comments_limit - len(base_comments))
+
+        if more_ids and (remaining is None or remaining > 0):
+            extra = self._fetch_morechildren_comments(
+                post_id=post_id,
+                child_ids=more_ids,
+                sort=sort,
+                limit=remaining,
+            )
+            base_comments.extend(extra)
+
+        # Deduplicate by comment id while preserving order.
+        deduped: List[Dict[str, Any]] = []
+        seen_ids: Set[str] = set()
+        for comment in base_comments:
+            comment_id = comment.get("id", "")
+            if comment_id and comment_id in seen_ids:
+                continue
+            if comment_id:
+                seen_ids.add(comment_id)
+            deduped.append(comment)
+
+        if comments_limit is not None:
+            return deduped[:comments_limit]
+        return deduped
+
+    def scrape_post_details(
+        self,
+        permalink: str,
+        sort: str = "new",
+        top_level_limit: int = 500,
+    ) -> Optional[Dict[str, Any]]:
         if not permalink.startswith("/"):
             permalink = "/" + permalink
 
         url = f"https://www.reddit.com{permalink}.json"
-        data = self._make_request(url)
+        params = {"sort": sort, "limit": min(max(top_level_limit, 1), 500), "depth": 10}
+        data = self._make_request(url, params=params)
         if not data or len(data) < 2:
             return None
 
@@ -349,9 +534,10 @@ class RedditParser:
         post_data = post_listing["data"]["children"][0]["data"]
 
         comments: List[Dict[str, Any]] = []
+        more_comment_ids: List[str] = []
         if "data" in comments_listing:
             children = comments_listing["data"].get("children", [])
-            comments = self._extract_comments(children)
+            comments, more_comment_ids = self._extract_comments(children)
 
         return {
             "title": post_data.get("title", ""),
@@ -365,6 +551,7 @@ class RedditParser:
             "id": post_data.get("id", ""),
             "subreddit": post_data.get("subreddit", ""),
             "comments": comments,
+            "more_comment_ids": more_comment_ids,
         }
 
     def process_comments(
@@ -376,6 +563,7 @@ class RedditParser:
         post_url: Optional[str] = None,
         post_id: Optional[str] = None,
         subreddit: Optional[str] = None,
+        enable_continue_prompt: bool = True,
     ) -> bool:
         for comment in comments:
             author = comment.get("author")
@@ -394,6 +582,7 @@ class RedditParser:
                 account_age_days = user_info.get("account_age_days")
                 user_karma = int(user_info.get("user_karma", 0) or 0)
                 comment_karma = int(user_info.get("comment_karma", 0) or 0)
+                account_unavailable = int(account_age_days is None and user_karma <= 0 and comment_karma <= 0)
 
                 comment_created = comment.get("created_utc", 0)
                 if comment_created:
@@ -421,6 +610,7 @@ class RedditParser:
                     "user_karma": user_karma,
                     "account_age_days": account_age_days,
                     "comment_karma": comment_karma,
+                    "is_account_unavailable": account_unavailable,
                     "is_bot": is_bot(
                         user_karma,
                         account_age_days or 0,
@@ -456,6 +646,8 @@ class RedditParser:
                     print(f"Reached target: {len(self.collected_data)} comments")
                     print("=" * 60)
                     self.save_to_csv()
+                    if not enable_continue_prompt:
+                        return False
                     if not self.ask_continue():
                         return False
                     self.target_comments += max(100, self.target_comments)
@@ -557,28 +749,102 @@ class RedditParser:
     def parse_post_comments(
         self,
         post_url: str,
-        target_comments: int = 700,
+        target_comments: Optional[int] = 700,
+        sort: str = "new",
     ) -> pd.DataFrame:
         self.target_comments = target_comments
         permalink = post_url.split("reddit.com")[1] if "reddit.com" in post_url else post_url
 
         print(f"Parsing post from: {post_url}")
-        post_details = self.scrape_post_details(permalink)
+        post_details = self.scrape_post_details(permalink, sort=sort)
         if not post_details:
             print("Failed to scrape post details")
             return pd.DataFrame()
 
+        comments = self._collect_post_comments(
+            post_details=post_details,
+            comments_limit=target_comments,
+            sort=sort,
+        )
+        print(f"Collected {len(comments)} comments from post listing.")
+
         self.process_comments(
-            comments=post_details.get("comments", []),
+            comments=comments,
             post_author=post_details.get("author", ""),
             post_time=post_details.get("created_utc", time.time()),
             post_title=post_details.get("title", ""),
             post_url=post_url,
             post_id=post_details.get("id", ""),
             subreddit=post_details.get("subreddit", ""),
+            enable_continue_prompt=False,
         )
 
         df = pd.DataFrame(self.collected_data)
+        self.save_to_csv()
+        self.save_comment_texts()
+        return df
+
+    def parse_subreddit_comments_by_date_range(
+        self,
+        subreddit_name: str,
+        start_date: str,
+        end_date: str,
+        comments_per_post_limit: Optional[int] = 300,
+        category: str = "new",
+        sort_comments: str = "new",
+    ) -> pd.DataFrame:
+        self.target_comments = None
+        print(f"Parsing subreddit by date range: r/{subreddit_name}")
+        print(f"Date range: {start_date} .. {end_date} (UTC)")
+        print(f"Comments per post limit: {'ALL' if comments_per_post_limit is None else comments_per_post_limit}")
+        print("-" * 60)
+
+        posts = self.fetch_subreddit_posts_by_date_range(
+            subreddit_name=subreddit_name,
+            start_date=start_date,
+            end_date=end_date,
+            category=category,
+        )
+        if not posts:
+            print("No posts found in that range.")
+            return pd.DataFrame()
+
+        print(f"Found {len(posts)} posts in range.")
+
+        for index, post in enumerate(posts, start=1):
+            title = post.get("title", "")[:70]
+            print(f"\n[{index}/{len(posts)}] {title}...")
+            post_details = self.scrape_post_details(post.get("permalink", ""), sort=sort_comments)
+            if not post_details:
+                print("  Could not fetch post details")
+                continue
+
+            comments = self._collect_post_comments(
+                post_details=post_details,
+                comments_limit=comments_per_post_limit,
+                sort=sort_comments,
+            )
+            print(f"  Collected comments from post: {len(comments)}")
+
+            initial = len(self.collected_data)
+            self.process_comments(
+                comments=comments,
+                post_author=post_details.get("author", ""),
+                post_time=post_details.get("created_utc", time.time()),
+                post_title=post_details.get("title", ""),
+                post_url=post.get("permalink", ""),
+                post_id=post_details.get("id", ""),
+                subreddit=post_details.get("subreddit", subreddit_name),
+                enable_continue_prompt=False,
+            )
+            added = len(self.collected_data) - initial
+            print(f"  Added valid comments: {added}")
+
+        df = pd.DataFrame(self.collected_data)
+        print("\n" + "=" * 60)
+        print(f"Date-range parsing complete: {len(df)} comments from {df['username'].nunique() if not df.empty else 0} users")
+        print("=" * 60 + "\n")
+
         self.save_to_csv()
         self.save_comment_texts()
         return df

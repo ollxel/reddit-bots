@@ -36,6 +36,8 @@ ACCOUNT_FEATURE_COLUMNS: List[str] = [
     "avg_sentence_length",
     "punctuation_ratio",
     "uppercase_ratio",
+    "keyword_salad_ratio",
+    "unavailable_profile_ratio",
     "unique_subreddits",
     "subreddit_entropy",
 ]
@@ -82,10 +84,33 @@ def _ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
             "_punctuation_ratio",
             "_uppercase_ratio",
             "_comment_length",
+            "_word_count",
         ],
         index=working.index,
     )
     working = pd.concat([working, style_df], axis=1)
+
+    if "is_account_unavailable" in working.columns:
+        working["_account_unavailable_flag"] = (
+            pd.to_numeric(working["is_account_unavailable"], errors="coerce")
+            .fillna(0.0)
+            .astype(int)
+        )
+    else:
+        account_age_numeric = pd.to_numeric(working.get("account_age_days"), errors="coerce")
+        user_karma_numeric = clean_numeric_column(working, "user_karma", default=0.0)
+        comment_karma_numeric = clean_numeric_column(working, "comment_karma", default=0.0)
+        working["_account_unavailable_flag"] = (
+            account_age_numeric.isna() & (user_karma_numeric <= 0) & (comment_karma_numeric <= 0)
+        ).astype(int)
+
+    # Detect short keyword-salad comments like "çanta kuş çay yastık".
+    working["_keyword_salad_flag"] = (
+        working["_word_count"].between(3, 10)
+        & (working["_punctuation_ratio"] <= 0.02)
+        & (working["_uppercase_ratio"] <= 0.02)
+        & (working["comment_score"] <= 0)
+    ).astype(int)
 
     return working
 
@@ -119,6 +144,8 @@ def _aggregate_group(group: pd.DataFrame) -> pd.Series:
         "avg_sentence_length": float(group["_avg_sentence_length"].mean()),
         "punctuation_ratio": float(group["_punctuation_ratio"].mean()),
         "uppercase_ratio": float(group["_uppercase_ratio"].mean()),
+        "keyword_salad_ratio": float(group["_keyword_salad_flag"].mean()),
+        "unavailable_profile_ratio": float(group["_account_unavailable_flag"].mean()),
         "unique_subreddits": int(group["subreddit"].nunique()) if "subreddit" in group.columns else 0,
         "subreddit_entropy": float(shannon_entropy(group["subreddit"])) if "subreddit" in group.columns else 0.0,
     }
@@ -152,6 +179,10 @@ def build_account_features(comments_df: pd.DataFrame) -> pd.DataFrame:
         if column not in grouped.columns:
             grouped[column] = 0.0
 
+    numeric_cols = [col for col in grouped.columns if col != "username"]
+    for col in numeric_cols:
+        grouped[col] = pd.to_numeric(grouped[col], errors="coerce").fillna(0.0)
+
     grouped = grouped.sort_values(by="comments_count", ascending=False).reset_index(drop=True)
     return grouped
 
@@ -162,7 +193,7 @@ def build_and_save_account_features(
 ) -> pd.DataFrame:
     comments_df = pd.read_csv(comments_csv_path)
     account_df = build_account_features(comments_df)
-    account_df.to_csv(output_csv_path, index=False)
+    account_df.to_csv(output_csv_path, index=False, float_format="%.6f")
     print(f"Account-level features saved to '{output_csv_path}'")
     return account_df
 

@@ -8,7 +8,7 @@ from typing import Optional
 import pandas as pd
 from dotenv import load_dotenv
 
-from reddit_bots.analysis.account_features import build_account_features, build_and_save_account_features
+from reddit_bots.analysis.account_features import build_account_features
 from reddit_bots.models.bot_classifier import AccountBotClassifier, plot_distributions
 from reddit_bots.parser.reddit_parser import RedditParser, SentimentAnalyzer
 
@@ -58,6 +58,17 @@ class RedditAccountAnalyzerCLI:
             print(f"Invalid integer, using default {default}.")
             return default
 
+    @staticmethod
+    def _read_csv_flexible(path: str) -> pd.DataFrame:
+        """
+        Reads CSV with auto delimiter detection (comma/semicolon/tab).
+        Protects against locale exports from Excel.
+        """
+        try:
+            return pd.read_csv(path, sep=None, engine="python")
+        except Exception:
+            return pd.read_csv(path)
+
     def _configure_sentiment(self, parser: RedditParser) -> None:
         env_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         api_key = env_key
@@ -90,16 +101,44 @@ class RedditAccountAnalyzerCLI:
         )
         self._configure_sentiment(parser)
 
-        mode = input("Parse mode: 1) Subreddit 2) Post URL [1]: ").strip() or "1"
-        target_comments = self._safe_int("Target comment count", 300)
+        mode = (
+            input(
+                "Parse mode: 1) Subreddit (classic) 2) Post URL 3) Subreddit by date range [1]: "
+            ).strip()
+            or "1"
+        )
 
         if mode == "2":
             post_url = input("Post URL: ").strip()
+            parse_all = self._ask_yes_no("Parse ALL comments under this post?", default=True)
+            target_comments = None if parse_all else self._safe_int("Comment count limit for this post", 500)
             self.raw_comments_df = parser.parse_post_comments(
                 post_url=post_url,
                 target_comments=target_comments,
+                sort="new",
             )
+        elif mode == "3":
+            subreddit = input("Subreddit (without r/): ").strip()
+            start_date = input("Start date UTC [YYYY-MM-DD]: ").strip()
+            end_date = input("End date UTC [YYYY-MM-DD]: ").strip()
+            comments_per_post = self._safe_int("Comments per post limit (0 = ALL)", 300)
+            comments_per_post_limit = None if comments_per_post <= 0 else comments_per_post
+            category = input("Listing category [new/hot/top/rising] (default new): ").strip() or "new"
+
+            try:
+                self.raw_comments_df = parser.parse_subreddit_comments_by_date_range(
+                    subreddit_name=subreddit,
+                    start_date=start_date,
+                    end_date=end_date,
+                    comments_per_post_limit=comments_per_post_limit,
+                    category=category,
+                    sort_comments="new",
+                )
+            except ValueError as exc:
+                print(f"Invalid date range: {exc}")
+                self.raw_comments_df = pd.DataFrame()
         else:
+            target_comments = self._safe_int("Target comment count", 300)
             subreddit = input("Subreddit (without r/): ").strip()
             category = input("Category [hot/new/top/rising] (default hot): ").strip() or "hot"
             time_filter = "week"
@@ -134,10 +173,13 @@ class RedditAccountAnalyzerCLI:
             if not os.path.exists(csv_path):
                 print(f"File not found: {csv_path}")
                 return
-            self.account_features_df = build_and_save_account_features(csv_path, "account_features.csv")
+            parsed_df = self._read_csv_flexible(csv_path)
+            self.account_features_df = build_account_features(parsed_df)
+            self.account_features_df.to_csv("account_features.csv", index=False, float_format="%.6f")
+            print("Account-level features saved to 'account_features.csv'")
         else:
             self.account_features_df = build_account_features(self.raw_comments_df)
-            self.account_features_df.to_csv("account_features.csv", index=False)
+            self.account_features_df.to_csv("account_features.csv", index=False, float_format="%.6f")
             print("Account-level features saved to 'account_features.csv'")
 
         print(f"Accounts profiled: {len(self.account_features_df)}")
@@ -156,7 +198,7 @@ class RedditAccountAnalyzerCLI:
             if not os.path.exists(features_path):
                 print(f"Account features file not found: {features_path}")
                 return
-            self.account_features_df = pd.read_csv(features_path)
+            self.account_features_df = self._read_csv_flexible(features_path)
 
         classifier = AccountBotClassifier()
         classifier.train(training_csv)
@@ -176,7 +218,7 @@ class RedditAccountAnalyzerCLI:
                     "Parsed comments CSV for plots [parsed_comments.csv]: "
                 ).strip() or "parsed_comments.csv"
                 if os.path.exists(fallback_comments_path):
-                    comments_df = pd.read_csv(fallback_comments_path)
+                    comments_df = self._read_csv_flexible(fallback_comments_path)
 
             paths = plot_distributions(
                 comments_df=comments_df,
@@ -195,7 +237,7 @@ class RedditAccountAnalyzerCLI:
             if not os.path.exists(path):
                 print(f"File not found: {path}")
                 return
-            self.analysis_df = pd.read_csv(path)
+            self.analysis_df = self._read_csv_flexible(path)
 
         threshold_raw = input("Minimum bot probability threshold [0.3]: ").strip() or "0.3"
         try:

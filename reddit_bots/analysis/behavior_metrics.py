@@ -60,13 +60,14 @@ def shannon_entropy(values: pd.Series) -> float:
     return float(-(probs * np.log2(probs)).sum())
 
 
-def text_metrics(text: str) -> Tuple[float, float, float, float, int]:
-    """Returns avg_word_len, avg_sentence_len, punctuation_ratio, uppercase_ratio, char_len."""
+def text_metrics(text: str) -> Tuple[float, float, float, float, int, int]:
+    """Returns avg_word_len, avg_sentence_len, punctuation_ratio, uppercase_ratio, char_len, word_count."""
     if not isinstance(text, str) or not text:
-        return 0.0, 0.0, 0.0, 0.0, 0
+        return 0.0, 0.0, 0.0, 0.0, 0, 0
 
     words = WORD_RE.findall(text)
     word_lengths = [len(word) for word in words]
+    word_count = len(words)
     avg_word_len = float(np.mean(word_lengths)) if word_lengths else 0.0
 
     sentence_chunks = [chunk.strip() for chunk in SENTENCE_SPLIT_RE.split(text) if chunk.strip()]
@@ -83,7 +84,7 @@ def text_metrics(text: str) -> Tuple[float, float, float, float, int]:
     alpha_chars = [ch for ch in text if ch.isalpha()]
     uppercase_ratio = float(sum(1 for ch in alpha_chars if ch.isupper()) / len(alpha_chars)) if alpha_chars else 0.0
 
-    return avg_word_len, avg_sentence_len, punctuation_ratio, uppercase_ratio, char_len
+    return avg_word_len, avg_sentence_len, punctuation_ratio, uppercase_ratio, char_len, word_count
 
 
 def clean_numeric_column(df: pd.DataFrame, column: str, default: float = 0.0) -> pd.Series:

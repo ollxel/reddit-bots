@@ -6,6 +6,7 @@ import os
 from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
@@ -118,6 +119,43 @@ class AccountBotClassifier:
             return "suspicious"
         return "likely bot"
 
+    @staticmethod
+    def _heuristic_bot_probability(row: pd.Series) -> float:
+        """
+        Rule-based boost for patterns underrepresented in train data:
+        suspended/empty profiles + short keyword-salad spam text.
+        """
+        score = 0.0
+        unavailable_ratio = float(row.get("unavailable_profile_ratio", 0.0) or 0.0)
+        keyword_salad_ratio = float(row.get("keyword_salad_ratio", 0.0) or 0.0)
+        avg_comment_score = float(row.get("avg_comment_score", 0.0) or 0.0)
+        comments_count = float(row.get("comments_count", 0.0) or 0.0)
+        avg_sentence_length = float(row.get("avg_sentence_length", 0.0) or 0.0)
+        punctuation_ratio = float(row.get("punctuation_ratio", 0.0) or 0.0)
+        uppercase_ratio = float(row.get("uppercase_ratio", 0.0) or 0.0)
+
+        if unavailable_ratio >= 0.9:
+            score = max(score, 0.55)
+        elif unavailable_ratio >= 0.5:
+            score = max(score, 0.45)
+
+        if keyword_salad_ratio >= 0.8 and avg_comment_score <= 0 and unavailable_ratio >= 0.5:
+            score = max(score, 0.8)
+        elif keyword_salad_ratio >= 0.5 and avg_comment_score <= 0:
+            score = max(score, 0.6)
+
+        if (
+            comments_count <= 3
+            and avg_comment_score <= 0
+            and avg_sentence_length <= 6
+            and punctuation_ratio <= 0.03
+            and uppercase_ratio <= 0.03
+            and unavailable_ratio > 0
+        ):
+            score = max(score, 0.75)
+
+        return float(min(score, 0.99))
+
     def predict(self, account_features_df: pd.DataFrame) -> pd.DataFrame:
         if self.model is None:
             raise RuntimeError("Model is not trained. Call train() first.")
@@ -126,9 +164,13 @@ class AccountBotClassifier:
         X = data[ACCOUNT_FEATURES].fillna(0.0)
 
         probabilities = self.model.predict_proba(X)
-        bot_probability = probabilities[:, 1] if probabilities.shape[1] > 1 else probabilities[:, 0]
+        model_probability = probabilities[:, 1] if probabilities.shape[1] > 1 else probabilities[:, 0]
+        heuristic_probability = data.apply(self._heuristic_bot_probability, axis=1).to_numpy(dtype=float)
+        bot_probability = np.maximum(model_probability, heuristic_probability)
 
         result = data.copy()
+        result["model_probability"] = model_probability
+        result["heuristic_probability"] = heuristic_probability
         result["bot_probability"] = bot_probability
         result["risk_level"] = result["bot_probability"].apply(self._risk_level)
 
@@ -146,7 +188,7 @@ class AccountBotClassifier:
         output_csv_path: str = "account_analysis.csv",
     ) -> pd.DataFrame:
         result = self.predict(account_features_df)
-        result.to_csv(output_csv_path, index=False)
+        result.to_csv(output_csv_path, index=False, float_format="%.6f")
         print(f"Account analysis saved to '{output_csv_path}'")
         return result
 
