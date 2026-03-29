@@ -50,5 +50,5 @@ python3 main.py
 Для быстрого доступа к инструменту вы можете использовать alias:
 
 ```bash
-alias reddit-bots="python3 ~/path/to/directory/reddit-bots/main.py"
+alias reddit-bots="source ~/path/to/directory/reddit-bots/.venv/bin/activate && python3 ~/path/to/directory/reddit-bots/main.py"
 ```
