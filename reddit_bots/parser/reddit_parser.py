@@ -177,6 +177,7 @@ class RedditParser:
         user_agent: str = "RedditParserCLI/1.0",
         run_sentiment: bool = True,
         unique_users_only: bool = False,
+        language: str = "en",
     ):
         self.collected_data: List[Dict[str, Any]] = []
         self.comment_texts: List[Dict[str, Any]] = []
@@ -192,6 +193,10 @@ class RedditParser:
         self.run_sentiment = run_sentiment
         self.sentiment: Optional[SentimentAnalyzer] = None
         self.unique_users_only = unique_users_only
+        self.language = "ru" if language == "ru" else "en"
+
+    def _txt(self, en: str, ru: str) -> str:
+        return ru if self.language == "ru" else en
 
     def _rate_limit(self) -> None:
         elapsed = time.time() - self.last_request_time
@@ -213,17 +218,17 @@ class RedditParser:
                     return None
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After", 60))
-                    print(f"Rate limited. Waiting {retry_after}s...")
+                    print(self._txt(f"Rate limited. Waiting {retry_after}s...", f"Лимит запросов. Жду {retry_after}с..."))
                     time.sleep(retry_after)
                     continue
                 response.raise_for_status()
                 return response.json()
             except requests.exceptions.RequestException as exc:
                 if attempt == max_retries - 1:
-                    print(f"Request error for {url}: {exc}")
+                    print(self._txt(f"Request error for {url}: {exc}", f"Ошибка запроса для {url}: {exc}"))
                     return None
                 wait = 2**attempt
-                print(f"Request failed, retrying in {wait}s...")
+                print(self._txt(f"Request failed, retrying in {wait}s...", f"Запрос не удался, повтор через {wait}с..."))
                 time.sleep(wait)
         return None
 
@@ -643,7 +648,7 @@ class RedditParser:
 
                 if self.target_comments and len(self.collected_data) >= self.target_comments:
                     print("\n" + "=" * 60)
-                    print(f"Reached target: {len(self.collected_data)} comments")
+                    print(self._txt(f"Reached target: {len(self.collected_data)} comments", f"Достигнут лимит: {len(self.collected_data)} комментариев"))
                     print("=" * 60)
                     self.save_to_csv()
                     if not enable_continue_prompt:
@@ -651,11 +656,11 @@ class RedditParser:
                     if not self.ask_continue():
                         return False
                     self.target_comments += max(100, self.target_comments)
-                    print(f"Continuing parsing. New target: {self.target_comments}")
+                    print(self._txt(f"Continuing parsing. New target: {self.target_comments}", f"Продолжаю парсинг. Новый лимит: {self.target_comments}"))
                     return True
 
             except Exception as exc:
-                print(f"Warning: Error processing comment from {author}: {exc}")
+                print(self._txt(f"Warning: Error processing comment from {author}: {exc}", f"Предупреждение: ошибка обработки комментария от {author}: {exc}"))
                 continue
 
         return True
@@ -665,7 +670,7 @@ class RedditParser:
             filename = f"reddit_comments_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         df = pd.DataFrame(self.collected_data)
         df.to_csv(filename, index=False, encoding="utf-8")
-        print(f"\nData saved to '{filename}'")
+        print(self._txt(f"\nData saved to '{filename}'", f"\nДанные сохранены в '{filename}'"))
         return filename
 
     def save_comment_texts(self, filename: Optional[str] = None) -> str:
@@ -673,11 +678,13 @@ class RedditParser:
             filename = f"comment_texts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         df = pd.DataFrame(self.comment_texts)
         df.to_csv(filename, index=False, encoding="utf-8")
-        print(f"Comment texts saved to '{filename}'")
+        print(self._txt(f"Comment texts saved to '{filename}'", f"Тексты комментариев сохранены в '{filename}'"))
         return filename
 
     def ask_continue(self) -> bool:
-        response = input("\nContinue parsing? (yes/no): ").strip().lower()
+        response = input(
+            self._txt("\nContinue parsing? (yes/no): ", "\nПродолжить парсинг? (yes/no): ")
+        ).strip().lower()
         return response in {"yes", "y"}
 
     def parse_subreddit_comments(
@@ -687,11 +694,12 @@ class RedditParser:
         category: str = "hot",
         time_filter: str = "week",
         target_comments: int = 700,
+        enable_continue_prompt: bool = True,
     ) -> pd.DataFrame:
         self.target_comments = target_comments
-        print(f"Parsing subreddit: r/{subreddit_name}")
-        print(f"Category: {category}, Time filter: {time_filter}")
-        print(f"Target comments: {target_comments}")
+        print(self._txt(f"Parsing subreddit: r/{subreddit_name}", f"Парсинг сабреддита: r/{subreddit_name}"))
+        print(self._txt(f"Category: {category}, Time filter: {time_filter}", f"Категория: {category}, Фильтр времени: {time_filter}"))
+        print(self._txt(f"Target comments: {target_comments}", f"Целевое число комментариев: {target_comments}"))
         print("-" * 60)
 
         posts = self.fetch_subreddit_posts(
@@ -701,10 +709,10 @@ class RedditParser:
             time_filter=time_filter,
         )
         if not posts:
-            print("No posts found")
+            print(self._txt("No posts found", "Посты не найдены"))
             return pd.DataFrame()
 
-        print(f"Found {len(posts)} posts")
+        print(self._txt(f"Found {len(posts)} posts", f"Найдено постов: {len(posts)}"))
 
         for i, post in enumerate(posts, start=1):
             title = post.get("title", "")[:60]
@@ -713,11 +721,11 @@ class RedditParser:
             permalink = post.get("permalink", "")
             post_details = self.scrape_post_details(permalink)
             if not post_details:
-                print("  Could not fetch post details")
+                print(self._txt("  Could not fetch post details", "  Не удалось получить детали поста"))
                 continue
 
             comments = post_details.get("comments", [])
-            print(f"  Found {len(comments)} total comments")
+            print(self._txt(f"  Found {len(comments)} total comments", f"  Найдено комментариев: {len(comments)}"))
 
             initial = len(self.collected_data)
             should_continue = self.process_comments(
@@ -728,6 +736,7 @@ class RedditParser:
                 post_url=post.get("permalink", ""),
                 post_id=post_details.get("id", ""),
                 subreddit=post_details.get("subreddit", subreddit_name),
+                enable_continue_prompt=enable_continue_prompt,
             )
             print(
                 f"  Added: {len(self.collected_data) - initial} | "
@@ -739,7 +748,12 @@ class RedditParser:
 
         df = pd.DataFrame(self.collected_data)
         print("\n" + "=" * 60)
-        print(f"Parsing complete: {len(df)} comments from {df['username'].nunique() if not df.empty else 0} users")
+        print(
+            self._txt(
+                f"Parsing complete: {len(df)} comments from {df['username'].nunique() if not df.empty else 0} users",
+                f"Парсинг завершен: {len(df)} комментариев от {df['username'].nunique() if not df.empty else 0} пользователей",
+            )
+        )
         print("=" * 60 + "\n")
 
         self.save_to_csv()
@@ -755,10 +769,10 @@ class RedditParser:
         self.target_comments = target_comments
         permalink = post_url.split("reddit.com")[1] if "reddit.com" in post_url else post_url
 
-        print(f"Parsing post from: {post_url}")
+        print(self._txt(f"Parsing post from: {post_url}", f"Парсинг поста: {post_url}"))
         post_details = self.scrape_post_details(permalink, sort=sort)
         if not post_details:
-            print("Failed to scrape post details")
+            print(self._txt("Failed to scrape post details", "Не удалось получить данные поста"))
             return pd.DataFrame()
 
         comments = self._collect_post_comments(
@@ -766,7 +780,7 @@ class RedditParser:
             comments_limit=target_comments,
             sort=sort,
         )
-        print(f"Collected {len(comments)} comments from post listing.")
+        print(self._txt(f"Collected {len(comments)} comments from post listing.", f"Собрано комментариев из поста: {len(comments)}"))
 
         self.process_comments(
             comments=comments,
@@ -794,9 +808,14 @@ class RedditParser:
         sort_comments: str = "new",
     ) -> pd.DataFrame:
         self.target_comments = None
-        print(f"Parsing subreddit by date range: r/{subreddit_name}")
-        print(f"Date range: {start_date} .. {end_date} (UTC)")
-        print(f"Comments per post limit: {'ALL' if comments_per_post_limit is None else comments_per_post_limit}")
+        print(self._txt(f"Parsing subreddit by date range: r/{subreddit_name}", f"Парсинг сабреддита по диапазону дат: r/{subreddit_name}"))
+        print(self._txt(f"Date range: {start_date} .. {end_date} (UTC)", f"Диапазон дат: {start_date} .. {end_date} (UTC)"))
+        print(
+            self._txt(
+                f"Comments per post limit: {'ALL' if comments_per_post_limit is None else comments_per_post_limit}",
+                f"Лимит комментариев на пост: {'ВСЕ' if comments_per_post_limit is None else comments_per_post_limit}",
+            )
+        )
         print("-" * 60)
 
         posts = self.fetch_subreddit_posts_by_date_range(
@@ -806,17 +825,17 @@ class RedditParser:
             category=category,
         )
         if not posts:
-            print("No posts found in that range.")
+            print(self._txt("No posts found in that range.", "В этом диапазоне посты не найдены."))
             return pd.DataFrame()
 
-        print(f"Found {len(posts)} posts in range.")
+        print(self._txt(f"Found {len(posts)} posts in range.", f"Найдено постов в диапазоне: {len(posts)}."))
 
         for index, post in enumerate(posts, start=1):
             title = post.get("title", "")[:70]
             print(f"\n[{index}/{len(posts)}] {title}...")
             post_details = self.scrape_post_details(post.get("permalink", ""), sort=sort_comments)
             if not post_details:
-                print("  Could not fetch post details")
+                print(self._txt("  Could not fetch post details", "  Не удалось получить детали поста"))
                 continue
 
             comments = self._collect_post_comments(
@@ -824,7 +843,7 @@ class RedditParser:
                 comments_limit=comments_per_post_limit,
                 sort=sort_comments,
             )
-            print(f"  Collected comments from post: {len(comments)}")
+            print(self._txt(f"  Collected comments from post: {len(comments)}", f"  Собрано комментариев из поста: {len(comments)}"))
 
             initial = len(self.collected_data)
             self.process_comments(
@@ -838,11 +857,16 @@ class RedditParser:
                 enable_continue_prompt=False,
             )
             added = len(self.collected_data) - initial
-            print(f"  Added valid comments: {added}")
+            print(self._txt(f"  Added valid comments: {added}", f"  Добавлено валидных комментариев: {added}"))
 
         df = pd.DataFrame(self.collected_data)
         print("\n" + "=" * 60)
-        print(f"Date-range parsing complete: {len(df)} comments from {df['username'].nunique() if not df.empty else 0} users")
+        print(
+            self._txt(
+                f"Date-range parsing complete: {len(df)} comments from {df['username'].nunique() if not df.empty else 0} users",
+                f"Парсинг по диапазону дат завершен: {len(df)} комментариев от {df['username'].nunique() if not df.empty else 0} пользователей",
+            )
+        )
         print("=" * 60 + "\n")
 
         self.save_to_csv()

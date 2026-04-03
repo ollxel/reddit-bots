@@ -38,7 +38,7 @@ def print_header() -> None:
             "RED",
             c(
                 "BOLD",
-"""
+                r"""
 ______ _________________ _____ _____     ______  _____ _____ _____ 
 | ___ \  ___|  _  \  _  \_   _|_   _|    | ___ \|  _  |_   _/  ___|
 | |_/ / |__ | | | | | | | | |   | |______| |_/ /| | | | | | \ `--. 
@@ -55,11 +55,22 @@ Behavioral Reddit Account Analyzer
     )
 
 
-def run_cli_interface() -> None:
-    run_cli()
+def select_language() -> str:
+    print(c("YELLOW", "Select language / Выберите язык:"))
+    print("  1) Русский")
+    print("  2) English")
+    choice = input("Language [1]: ").strip() or "1"
+    if choice == "2":
+        return "en"
+    return "ru"
+
+
+def run_cli_interface(language: str) -> None:
+    run_cli(language=language)
 
 
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     print_header()
-    run_cli_interface()
+    lang = select_language()
+    run_cli_interface(language=lang)
