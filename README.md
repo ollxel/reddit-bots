@@ -2,9 +2,12 @@
 
 [English README](README.md) | [Русский README](README_RU.md)
 
-![](image1.jpg)
+![](cli-en.jpg)
 
-`REDDIT-BOTS` is a compact CLI tool for Reddit account risk analysis.
+`REDDIT-BOTS` is a compact Reddit account risk analyzer with:
+- terminal CLI (`Default mode` and `Advanced mode`)
+- local Web interface (`Web mode`)
+
 It parses comments, builds account-level behavior features, and estimates suspiciousness (`bot_probability`).
 
 ## Project Tree
@@ -22,8 +25,10 @@ reddit-bots/
 │   │   └── account_features.py
 │   ├── models/
 │   │   └── bot_classifier.py
-│   └── cli/
-│       └── cli.py
+│   ├── cli/
+│   │   └── cli.py
+│   └── web/
+│       └── web_mode.py
 ├── requirements.txt
 ├── reddit_dead_internet_analysis_2026.csv
 ├── image1.jpg
@@ -46,6 +51,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python3 main.py
 ```
+
+## Web Interface
+
+1. Start the app: `python3 main.py`
+2. Select language.
+3. Select `3) Web mode`.
+4. Open `http://127.0.0.1:8080` (or custom host/port you entered).
+
+The Web mode runs the same pipeline as default flow:
+`parse -> account features -> analyzer -> suspicious accounts`.
 
 For quick access to the tool, you can use alias:
 
