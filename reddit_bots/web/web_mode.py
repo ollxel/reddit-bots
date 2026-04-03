@@ -438,6 +438,8 @@ def _render_index_html(host: str, port: int, language: str = "en") -> str:
       background: linear-gradient(180deg, var(--bg0), var(--bg1));
       min-height: 100vh;
       letter-spacing: 0.02em;
+      font-size: 15px;
+      line-height: 1.45;
     }
 
     body::before {
@@ -466,7 +468,7 @@ def _render_index_html(host: str, port: int, language: str = "en") -> str:
     .banner {
       color: var(--red);
       white-space: pre;
-      font-size: 12px;
+      font-size: 14px;
       line-height: 1.2;
       margin: 0 0 12px 0;
       text-shadow: 0 0 10px rgba(213, 90, 42, 0.25);
@@ -496,19 +498,19 @@ def _render_index_html(host: str, port: int, language: str = "en") -> str:
     .panel h3 {
       margin: 0 0 8px 0;
       color: var(--red);
-      font-size: 14px;
+      font-size: 17px;
       font-weight: 700;
     }
 
     .panel p {
       margin: 0 0 10px 0;
       color: var(--amber);
-      font-size: 12px;
+      font-size: 14px;
     }
 
     .hint {
       color: var(--cyan);
-      font-size: 12px;
+      font-size: 14px;
       margin: 0 0 12px 0;
       white-space: pre-wrap;
     }
@@ -517,7 +519,7 @@ def _render_index_html(host: str, port: int, language: str = "en") -> str:
       display: block;
       margin-bottom: 6px;
       color: var(--cyan);
-      font-size: 12px;
+      font-size: 14px;
     }
 
     input, select {
@@ -544,7 +546,7 @@ def _render_index_html(host: str, port: int, language: str = "en") -> str:
       gap: 8px;
       margin: 4px 0 8px;
       color: var(--amber);
-      font-size: 12px;
+      font-size: 14px;
     }
 
     .check input {
@@ -623,7 +625,7 @@ def _render_index_html(host: str, port: int, language: str = "en") -> str:
     table {
       border-collapse: collapse;
       width: 100%;
-      font-size: 12px;
+      font-size: 14px;
     }
 
     th, td {
