@@ -240,6 +240,10 @@ class WebModeServer:
         parser = self._build_parser(payload)
         parsed_df = self._parse_by_mode(parser, payload)
         if parsed_df is None or parsed_df.empty:
+            if getattr(parser, "reddit_public_json_blocked", False):
+                raise ValueError(
+                    "No comments parsed. Reddit public JSON returned HTTP 403; fallback source also had no matching data for these filters."
+                )
             raise ValueError("No comments parsed. Check parse input settings.")
 
         parsed_df.to_csv("parsed_comments.csv", index=False, float_format="%.6f")

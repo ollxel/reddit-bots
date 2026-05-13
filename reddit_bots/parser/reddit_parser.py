@@ -172,6 +172,9 @@ Comment:
 class RedditParser:
     """Collects Reddit comments with metadata for account-level analysis."""
 
+    REDDIT_BASE_URL = "https://www.reddit.com"
+    PULLPUSH_BASE_URL = "https://api.pullpush.io/reddit"
+
     def __init__(
         self,
         user_agent: str = "RedditParserCLI/1.0",
@@ -189,6 +192,10 @@ class RedditParser:
         self.session.headers.update({"User-Agent": user_agent})
         self.last_request_time = 0.0
         self.min_request_interval = 5.0
+        self.last_pullpush_request_time = 0.0
+        self.pullpush_min_request_interval = 0.35
+        self.reddit_public_json_blocked = False
+        self._printed_blocked_notice = False
 
         self.run_sentiment = run_sentiment
         self.sentiment: Optional[SentimentAnalyzer] = None
@@ -204,6 +211,12 @@ class RedditParser:
             time.sleep(self.min_request_interval - elapsed)
         self.last_request_time = time.time()
 
+    def _rate_limit_pullpush(self) -> None:
+        elapsed = time.time() - self.last_pullpush_request_time
+        if elapsed < self.pullpush_min_request_interval:
+            time.sleep(self.pullpush_min_request_interval - elapsed)
+        self.last_pullpush_request_time = time.time()
+
     def _make_request(
         self,
         url: str,
@@ -214,7 +227,18 @@ class RedditParser:
         for attempt in range(max_retries):
             try:
                 response = self.session.get(url, params=params, timeout=10)
-                if response.status_code in {403, 404}:
+                if response.status_code == 403:
+                    self.reddit_public_json_blocked = True
+                    if not self._printed_blocked_notice:
+                        print(
+                            self._txt(
+                                "Reddit public JSON returned HTTP 403. Falling back to PullPush archive where possible.",
+                                "Reddit публичный JSON API вернул HTTP 403. Переключаюсь на архив PullPush там, где это возможно.",
+                            )
+                        )
+                        self._printed_blocked_notice = True
+                    return None
+                if response.status_code == 404:
                     return None
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After", 60))
@@ -222,7 +246,10 @@ class RedditParser:
                     time.sleep(retry_after)
                     continue
                 response.raise_for_status()
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError:
+                    return None
             except requests.exceptions.RequestException as exc:
                 if attempt == max_retries - 1:
                     print(self._txt(f"Request error for {url}: {exc}", f"Ошибка запроса для {url}: {exc}"))
@@ -231,6 +258,402 @@ class RedditParser:
                 print(self._txt(f"Request failed, retrying in {wait}s...", f"Запрос не удался, повтор через {wait}с..."))
                 time.sleep(wait)
         return None
+
+    def _make_pullpush_request(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3,
+    ) -> Optional[Dict[str, Any]]:
+        self._rate_limit_pullpush()
+        url = f"{self.PULLPUSH_BASE_URL}/{endpoint.lstrip('/')}"
+        for attempt in range(max_retries):
+            try:
+                response = self.session.get(url, params=params, timeout=15)
+                if response.status_code in {403, 404}:
+                    return None
+                if response.status_code == 429:
+                    wait = 2 ** attempt
+                    time.sleep(wait)
+                    continue
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except ValueError:
+                    return None
+            except requests.exceptions.RequestException:
+                if attempt == max_retries - 1:
+                    return None
+                time.sleep(2**attempt)
+        return None
+
+    @staticmethod
+    def _time_filter_to_seconds(time_filter: str) -> Optional[int]:
+        mapping = {
+            "hour": 3600,
+            "day": 86400,
+            "week": 7 * 86400,
+            "month": 30 * 86400,
+            "year": 365 * 86400,
+            "all": None,
+        }
+        return mapping.get((time_filter or "").strip().lower())
+
+    @staticmethod
+    def _extract_post_id_from_permalink(permalink: str) -> str:
+        if not permalink:
+            return ""
+        parts = [part for part in permalink.strip("/").split("/") if part]
+        if "comments" not in parts:
+            return ""
+        idx = parts.index("comments")
+        if idx + 1 >= len(parts):
+            return ""
+        return parts[idx + 1]
+
+    @staticmethod
+    def _parse_float(value: Any) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _normalize_submission_record(
+        post_data: Dict[str, Any],
+        subreddit_fallback: str,
+    ) -> Dict[str, Any]:
+        return {
+            "title": post_data.get("title", ""),
+            "author": post_data.get("author", ""),
+            "permalink": post_data.get("permalink", ""),
+            "created_utc": post_data.get("created_utc", 0),
+            "score": post_data.get("score", 0),
+            "num_comments": post_data.get("num_comments", 0),
+            "id": post_data.get("id", ""),
+            "subreddit": post_data.get("subreddit", subreddit_fallback),
+        }
+
+    def _fetch_pullpush_submissions_by_ids(self, post_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        records: Dict[str, Dict[str, Any]] = {}
+        clean_ids = [item for item in post_ids if item]
+        for idx in range(0, len(clean_ids), 100):
+            chunk = clean_ids[idx: idx + 100]
+            data = self._make_pullpush_request(
+                "search/submission/",
+                params={"ids": ",".join(chunk), "size": len(chunk)},
+                max_retries=2,
+            )
+            if not data:
+                continue
+            for item in data.get("data", []):
+                post_id = str(item.get("id", "")).strip()
+                if post_id and post_id not in records:
+                    records[post_id] = item
+        return records
+
+    def _fetch_subreddit_posts_pullpush(
+        self,
+        subreddit_name: str,
+        limit: int,
+        category: str,
+        time_filter: str,
+    ) -> List[Dict[str, Any]]:
+        per_batch = 100
+        max_batches = 20
+        min_candidates = max(limit * 4, limit)
+        before_ts: Optional[int] = None
+        after_ts: Optional[int] = None
+
+        if category == "top":
+            seconds = self._time_filter_to_seconds(time_filter)
+            if seconds is not None:
+                after_ts = int(time.time()) - seconds
+
+        post_activity: Dict[str, int] = {}
+        newest_comment_ts: Dict[str, float] = {}
+
+        for _ in range(max_batches):
+            params: Dict[str, Any] = {
+                "subreddit": subreddit_name,
+                "size": per_batch,
+                "sort": "desc",
+                "sort_type": "created_utc",
+            }
+            if before_ts is not None:
+                params["before"] = before_ts
+            if after_ts is not None:
+                params["after"] = after_ts
+
+            data = self._make_pullpush_request("search/comment/", params=params, max_retries=2)
+            comments = data.get("data", []) if data else []
+            if not comments:
+                if after_ts is not None and not post_activity:
+                    # If exact top-time window has no data in archival source, fall back to all-time archive.
+                    after_ts = None
+                    continue
+                break
+
+            oldest_ts_in_batch: Optional[int] = None
+            for item in comments:
+                link_id = str(item.get("link_id", "") or "")
+                post_id = link_id.replace("t3_", "")
+                if not post_id:
+                    continue
+                post_activity[post_id] = post_activity.get(post_id, 0) + 1
+
+                created = self._parse_float(item.get("created_utc", 0))
+                if created > newest_comment_ts.get(post_id, 0):
+                    newest_comment_ts[post_id] = created
+
+                created_int = int(created)
+                if oldest_ts_in_batch is None or created_int < oldest_ts_in_batch:
+                    oldest_ts_in_batch = created_int
+
+            if len(post_activity) >= min_candidates:
+                break
+            if oldest_ts_in_batch is None or oldest_ts_in_batch <= 1:
+                break
+            if before_ts is not None and oldest_ts_in_batch - 1 >= before_ts:
+                break
+            before_ts = oldest_ts_in_batch - 1
+
+        if not post_activity:
+            return []
+
+        ranked_ids = sorted(
+            post_activity.keys(),
+            key=lambda pid: (post_activity.get(pid, 0), newest_comment_ts.get(pid, 0)),
+            reverse=True,
+        )
+        submissions_by_id = self._fetch_pullpush_submissions_by_ids(ranked_ids[: max(limit * 8, limit)])
+
+        posts: List[Dict[str, Any]] = []
+        for post_id in ranked_ids:
+            submission = submissions_by_id.get(post_id)
+            if not submission:
+                continue
+            normalized = self._normalize_submission_record(submission, subreddit_name)
+            normalized["_activity"] = post_activity.get(post_id, 0)
+            posts.append(normalized)
+            if len(posts) >= max(limit * 3, limit):
+                break
+
+        if not posts:
+            return []
+
+        if category == "top":
+            posts.sort(
+                key=lambda item: (
+                    int(item.get("score", 0) or 0),
+                    int(item.get("num_comments", 0) or 0),
+                ),
+                reverse=True,
+            )
+        elif category in {"new", "rising"}:
+            posts.sort(key=lambda item: self._parse_float(item.get("created_utc", 0)), reverse=True)
+        else:
+            posts.sort(
+                key=lambda item: (
+                    int(item.get("_activity", 0) or 0),
+                    int(item.get("score", 0) or 0),
+                ),
+                reverse=True,
+            )
+
+        final_posts: List[Dict[str, Any]] = []
+        for item in posts[:limit]:
+            item.pop("_activity", None)
+            final_posts.append(item)
+        return final_posts
+
+    def _fetch_subreddit_posts_by_date_range_pullpush(
+        self,
+        subreddit_name: str,
+        start_ts: float,
+        end_ts: float,
+        category: str,
+        max_batches: int,
+    ) -> List[Dict[str, Any]]:
+        before_ts = int(end_ts)
+        posts_by_id: Dict[str, Dict[str, Any]] = {}
+
+        for _ in range(max_batches):
+            params = {
+                "subreddit": subreddit_name,
+                "size": 100,
+                "sort": "desc",
+                "sort_type": "created_utc",
+                "before": before_ts,
+                "after": int(start_ts),
+            }
+            data = self._make_pullpush_request("search/submission/", params=params, max_retries=2)
+            submissions = data.get("data", []) if data else []
+            if not submissions:
+                break
+
+            oldest_ts_in_batch: Optional[int] = None
+            for submission in submissions:
+                post_id = str(submission.get("id", "")).strip()
+                if not post_id or post_id in posts_by_id:
+                    continue
+                created_utc = self._parse_float(submission.get("created_utc", 0))
+                if created_utc < start_ts or created_utc > end_ts:
+                    continue
+                posts_by_id[post_id] = self._normalize_submission_record(submission, subreddit_name)
+
+                created_int = int(created_utc)
+                if oldest_ts_in_batch is None or created_int < oldest_ts_in_batch:
+                    oldest_ts_in_batch = created_int
+
+            if oldest_ts_in_batch is None or oldest_ts_in_batch <= int(start_ts):
+                break
+            if oldest_ts_in_batch - 1 >= before_ts:
+                break
+            before_ts = oldest_ts_in_batch - 1
+
+        posts = list(posts_by_id.values())
+        if category == "top":
+            posts.sort(key=lambda item: int(item.get("score", 0) or 0), reverse=True)
+        else:
+            posts.sort(key=lambda item: self._parse_float(item.get("created_utc", 0)))
+        return posts
+
+    def _fetch_post_comments_pullpush(
+        self,
+        post_id: str,
+        sort: str = "new",
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        if not post_id:
+            return []
+
+        normalized_sort = (sort or "new").strip().lower()
+        if normalized_sort in {"top", "best"}:
+            sort_type = "score"
+            sort_order = "desc"
+        elif normalized_sort == "old":
+            sort_type = "created_utc"
+            sort_order = "asc"
+        else:
+            sort_type = "created_utc"
+            sort_order = "desc"
+
+        collected: List[Dict[str, Any]] = []
+        seen_ids: Set[str] = set()
+        before_ts: Optional[int] = None
+        after_ts: Optional[int] = None
+
+        for _ in range(30):
+            if len(collected) >= limit:
+                break
+
+            size = min(100, max(1, limit - len(collected)))
+            params: Dict[str, Any] = {
+                "link_id": post_id,
+                "size": size,
+                "sort": sort_order,
+                "sort_type": sort_type,
+            }
+            if before_ts is not None:
+                params["before"] = before_ts
+            if after_ts is not None:
+                params["after"] = after_ts
+
+            data = self._make_pullpush_request("search/comment/", params=params, max_retries=2)
+            rows = data.get("data", []) if data else []
+            if not rows:
+                break
+
+            min_created: Optional[int] = None
+            max_created: Optional[int] = None
+
+            for item in rows:
+                comment_id = str(item.get("id", "")).strip()
+                if comment_id and comment_id in seen_ids:
+                    continue
+                if comment_id:
+                    seen_ids.add(comment_id)
+
+                created_utc = self._parse_float(item.get("created_utc", 0))
+                created_int = int(created_utc)
+                if min_created is None or created_int < min_created:
+                    min_created = created_int
+                if max_created is None or created_int > max_created:
+                    max_created = created_int
+
+                collected.append(
+                    {
+                        "id": comment_id,
+                        "author": item.get("author", ""),
+                        "body": item.get("body", ""),
+                        "score": item.get("score", 0),
+                        "created_utc": created_utc,
+                        "link_id": item.get("link_id", f"t3_{post_id}"),
+                    }
+                )
+                if len(collected) >= limit:
+                    break
+
+            if sort_order == "desc":
+                if min_created is None:
+                    break
+                next_before = min_created - 1
+                if before_ts is not None and next_before >= before_ts:
+                    break
+                before_ts = next_before
+            else:
+                if max_created is None:
+                    break
+                next_after = max_created + 1
+                if after_ts is not None and next_after <= after_ts:
+                    break
+                after_ts = next_after
+
+        return collected[:limit]
+
+    def _scrape_post_details_pullpush(
+        self,
+        permalink: str,
+        sort: str,
+        top_level_limit: int,
+    ) -> Optional[Dict[str, Any]]:
+        post_id = self._extract_post_id_from_permalink(permalink)
+        if not post_id:
+            return None
+
+        submissions_by_id = self._fetch_pullpush_submissions_by_ids([post_id])
+        submission = submissions_by_id.get(post_id, {})
+
+        comments = self._fetch_post_comments_pullpush(
+            post_id=post_id,
+            sort=sort,
+            limit=min(max(top_level_limit, 1), 1500),
+        )
+
+        if not submission and not comments:
+            return None
+
+        normalized = self._normalize_submission_record(submission, "")
+        if not normalized.get("id"):
+            normalized["id"] = post_id
+        if not normalized.get("permalink"):
+            normalized["permalink"] = permalink
+
+        return {
+            "title": normalized.get("title", ""),
+            "author": normalized.get("author", ""),
+            "created_utc": normalized.get("created_utc", 0),
+            "score": normalized.get("score", 0),
+            "num_comments": normalized.get("num_comments", len(comments)),
+            "selftext": submission.get("selftext", "") if submission else "",
+            "url": submission.get("url", "") if submission else "",
+            "permalink": normalized.get("permalink", permalink),
+            "id": normalized.get("id", post_id),
+            "subreddit": normalized.get("subreddit", ""),
+            "comments": comments,
+            "more_comment_ids": [],
+        }
 
     @staticmethod
     def _parse_date_boundary(date_text: str, end_of_day: bool = False) -> float:
@@ -243,7 +666,12 @@ class RedditParser:
         if username in self.user_cache:
             return self.user_cache[username]
 
-        url = f"https://www.reddit.com/user/{username}/about.json"
+        if self.reddit_public_json_blocked:
+            info = {"account_age_days": None, "user_karma": 0, "comment_karma": 0}
+            self.user_cache[username] = info
+            return info
+
+        url = f"{self.REDDIT_BASE_URL}/user/{username}/about.json"
         data = self._make_request(url)
 
         if data and "data" in data:
@@ -278,14 +706,22 @@ class RedditParser:
         category: str = "hot",
         time_filter: str = "week",
     ) -> List[Dict[str, Any]]:
-        url = f"https://www.reddit.com/r/{subreddit_name}/{category}.json"
+        if category not in {"new", "hot", "top", "rising"}:
+            category = "hot"
+
+        url = f"{self.REDDIT_BASE_URL}/r/{subreddit_name}/{category}.json"
         params: Dict[str, Any] = {"limit": min(limit, 100)}
         if category == "top":
             params["t"] = time_filter
 
         data = self._make_request(url, params)
         if not data or "data" not in data:
-            return []
+            return self._fetch_subreddit_posts_pullpush(
+                subreddit_name=subreddit_name,
+                limit=limit,
+                category=category,
+                time_filter=time_filter,
+            )
 
         posts: List[Dict[str, Any]] = []
         for child in data["data"].get("children", []):
@@ -326,7 +762,7 @@ class RedditParser:
         if category not in {"new", "hot", "top", "rising"}:
             category = "new"
 
-        url = f"https://www.reddit.com/r/{subreddit_name}/{category}.json"
+        url = f"{self.REDDIT_BASE_URL}/r/{subreddit_name}/{category}.json"
         posts: List[Dict[str, Any]] = []
         after: Optional[str] = None
 
@@ -378,7 +814,16 @@ class RedditParser:
                 break
 
         posts.sort(key=lambda item: item.get("created_utc", 0))
-        return posts
+        if posts:
+            return posts
+
+        return self._fetch_subreddit_posts_by_date_range_pullpush(
+            subreddit_name=subreddit_name,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            category=category,
+            max_batches=max_batches,
+        )
 
     def _extract_comments(
         self,
@@ -438,7 +883,10 @@ class RedditParser:
         if not post_id or not child_ids:
             return []
 
-        url = "https://www.reddit.com/api/morechildren.json"
+        if self.reddit_public_json_blocked:
+            return []
+
+        url = f"{self.REDDIT_BASE_URL}/api/morechildren.json"
         queue: List[str] = list(child_ids)
         seen: Set[str] = set(queue)
         collected: List[Dict[str, Any]] = []
@@ -524,17 +972,17 @@ class RedditParser:
         if not permalink.startswith("/"):
             permalink = "/" + permalink
 
-        url = f"https://www.reddit.com{permalink}.json"
+        url = f"{self.REDDIT_BASE_URL}{permalink}.json"
         params = {"sort": sort, "limit": min(max(top_level_limit, 1), 500), "depth": 10}
         data = self._make_request(url, params=params)
         if not data or len(data) < 2:
-            return None
+            return self._scrape_post_details_pullpush(permalink, sort=sort, top_level_limit=top_level_limit)
 
         post_listing = data[0]
         comments_listing = data[1]
 
         if "data" not in post_listing or "children" not in post_listing["data"]:
-            return None
+            return self._scrape_post_details_pullpush(permalink, sort=sort, top_level_limit=top_level_limit)
 
         post_data = post_listing["data"]["children"][0]["data"]
 
