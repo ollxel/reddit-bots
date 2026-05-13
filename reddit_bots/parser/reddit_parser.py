@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta, timezone
+import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
@@ -173,6 +174,7 @@ class RedditParser:
     """Collects Reddit comments with metadata for account-level analysis."""
 
     REDDIT_BASE_URL = "https://www.reddit.com"
+    REDDIT_OAUTH_BASE_URL = "https://oauth.reddit.com"
     PULLPUSH_BASE_URL = "https://api.pullpush.io/reddit"
 
     def __init__(
@@ -181,6 +183,9 @@ class RedditParser:
         run_sentiment: bool = True,
         unique_users_only: bool = False,
         language: str = "en",
+        reddit_client_id: Optional[str] = None,
+        reddit_client_secret: Optional[str] = None,
+        prefer_reddit_oauth: bool = True,
     ):
         self.collected_data: List[Dict[str, Any]] = []
         self.comment_texts: List[Dict[str, Any]] = []
@@ -196,6 +201,15 @@ class RedditParser:
         self.pullpush_min_request_interval = 0.35
         self.reddit_public_json_blocked = False
         self._printed_blocked_notice = False
+        self.user_agent = user_agent
+
+        self.reddit_client_id = (reddit_client_id or os.getenv("REDDIT_CLIENT_ID", "")).strip()
+        self.reddit_client_secret = (reddit_client_secret or os.getenv("REDDIT_CLIENT_SECRET", "")).strip()
+        self.reddit_oauth_enabled = bool(prefer_reddit_oauth and self.reddit_client_id and self.reddit_client_secret)
+        self.reddit_oauth_token: str = ""
+        self.reddit_oauth_expires_at: float = 0.0
+        self._printed_oauth_notice = False
+        self._printed_oauth_error = False
 
         self.run_sentiment = run_sentiment
         self.sentiment: Optional[SentimentAnalyzer] = None
@@ -226,8 +240,35 @@ class RedditParser:
         self._rate_limit()
         for attempt in range(max_retries):
             try:
-                response = self.session.get(url, params=params, timeout=10)
-                if response.status_code == 403:
+                request_url = url
+                request_headers: Optional[Dict[str, str]] = None
+                used_oauth = False
+
+                if self.reddit_oauth_enabled and url.startswith(self.REDDIT_BASE_URL):
+                    if self._ensure_reddit_oauth_token():
+                        request_url = self._to_oauth_url(url)
+                        request_headers = {"Authorization": f"Bearer {self.reddit_oauth_token}"}
+                        used_oauth = True
+                    elif not self._printed_oauth_error:
+                        print(
+                            self._txt(
+                                "Reddit OAuth token request failed. Check REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET.",
+                                "Не удалось получить Reddit OAuth токен. Проверьте REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET.",
+                            )
+                        )
+                        self._printed_oauth_error = True
+
+                response = self.session.get(request_url, params=params, headers=request_headers, timeout=10)
+
+                if used_oauth and response.status_code == 401:
+                    # Token can expire mid-run; refresh once and retry.
+                    self.reddit_oauth_expires_at = 0.0
+                    self.reddit_oauth_token = ""
+                    if self._ensure_reddit_oauth_token():
+                        continue
+                    return None
+
+                if not used_oauth and response.status_code == 403:
                     self.reddit_public_json_blocked = True
                     if not self._printed_blocked_notice:
                         print(
@@ -258,6 +299,51 @@ class RedditParser:
                 print(self._txt(f"Request failed, retrying in {wait}s...", f"Запрос не удался, повтор через {wait}с..."))
                 time.sleep(wait)
         return None
+
+    @staticmethod
+    def _to_oauth_url(url: str) -> str:
+        if url.startswith(RedditParser.REDDIT_BASE_URL):
+            return RedditParser.REDDIT_OAUTH_BASE_URL + url[len(RedditParser.REDDIT_BASE_URL):]
+        return url
+
+    def _ensure_reddit_oauth_token(self) -> bool:
+        if not self.reddit_oauth_enabled:
+            return False
+
+        now = time.time()
+        if self.reddit_oauth_token and now < self.reddit_oauth_expires_at - 15:
+            return True
+
+        try:
+            response = requests.post(
+                f"{self.REDDIT_BASE_URL}/api/v1/access_token",
+                auth=(self.reddit_client_id, self.reddit_client_secret),
+                data={"grant_type": "client_credentials"},
+                headers={"User-Agent": self.user_agent},
+                timeout=15,
+            )
+            if response.status_code >= 400:
+                return False
+
+            payload = response.json()
+            access_token = str(payload.get("access_token", "")).strip()
+            expires_in = int(payload.get("expires_in", 3600) or 3600)
+            if not access_token:
+                return False
+
+            self.reddit_oauth_token = access_token
+            self.reddit_oauth_expires_at = now + max(60, expires_in)
+            if not self._printed_oauth_notice:
+                print(
+                    self._txt(
+                        "Reddit OAuth enabled. Using live API via oauth.reddit.com.",
+                        "Reddit OAuth включен. Использую live API через oauth.reddit.com.",
+                    )
+                )
+                self._printed_oauth_notice = True
+            return True
+        except (requests.exceptions.RequestException, ValueError, TypeError):
+            return False
 
     def _make_pullpush_request(
         self,

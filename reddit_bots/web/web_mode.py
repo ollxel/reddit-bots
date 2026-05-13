@@ -65,6 +65,8 @@ WEB_TEXT: Dict[str, Dict[str, str]] = {
         "sentiment": "enable sentiment",
         "api_key": "OpenRouter API key (optional)",
         "model": "OpenRouter model",
+        "reddit_client_id": "Reddit client_id (optional)",
+        "reddit_client_secret": "Reddit client_secret (optional)",
         "training_csv": "training CSV",
         "threshold": "suspicious threshold",
         "run": "RUN DEFAULT PIPELINE",
@@ -90,6 +92,7 @@ WEB_TEXT: Dict[str, Dict[str, str]] = {
         "running": "running",
         "done": "done",
         "error": "error",
+        "oauth_required_no_data": "No comments parsed. Reddit public JSON returned HTTP 403 and fallback archive has no matching data. Add REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET to use live Reddit OAuth API.",
     },
     "ru": {
         "title": "REDDIT-BOTS | Веб режим",
@@ -107,6 +110,8 @@ WEB_TEXT: Dict[str, Dict[str, str]] = {
         "sentiment": "включить sentiment",
         "api_key": "OpenRouter API ключ (необязательно)",
         "model": "модель OpenRouter",
+        "reddit_client_id": "Reddit client_id (необязательно)",
+        "reddit_client_secret": "Reddit client_secret (необязательно)",
         "training_csv": "обучающий CSV",
         "threshold": "порог подозрительности",
         "run": "ЗАПУСТИТЬ ПАЙПЛАЙН",
@@ -132,6 +137,7 @@ WEB_TEXT: Dict[str, Dict[str, str]] = {
         "running": "выполняется",
         "done": "завершено",
         "error": "ошибка",
+        "oauth_required_no_data": "Комментарии не собраны. Reddit публичный JSON API вернул HTTP 403, а в fallback-архиве нет данных для этих фильтров. Добавьте REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET для live-доступа через Reddit OAuth API.",
     },
 }
 
@@ -172,11 +178,17 @@ class WebModeServer:
         }
 
     def _build_parser(self, payload: Dict[str, Any]) -> RedditParser:
+        reddit_client_id = str(payload.get("reddit_client_id") or os.getenv("REDDIT_CLIENT_ID", "")).strip()
+        reddit_client_secret = str(payload.get("reddit_client_secret") or os.getenv("REDDIT_CLIENT_SECRET", "")).strip()
+
         parser = RedditParser(
             user_agent="RedditDataCollector/2.0 (WebMode)",
             run_sentiment=_to_bool(payload.get("enable_sentiment"), default=False),
             unique_users_only=False,
             language=self.language,
+            reddit_client_id=reddit_client_id or None,
+            reddit_client_secret=reddit_client_secret or None,
+            prefer_reddit_oauth=True,
         )
 
         if parser.run_sentiment:
@@ -241,6 +253,10 @@ class WebModeServer:
         parsed_df = self._parse_by_mode(parser, payload)
         if parsed_df is None or parsed_df.empty:
             if getattr(parser, "reddit_public_json_blocked", False):
+                if not getattr(parser, "reddit_oauth_enabled", False):
+                    raise ValueError(
+                        self._t("oauth_required_no_data")
+                    )
                 raise ValueError(
                     "No comments parsed. Reddit public JSON returned HTTP 403; fallback source also had no matching data for these filters."
                 )
@@ -704,6 +720,15 @@ port: __PORT__</div>
     <input name="api_key" autocomplete="off" />
   </label>
 
+  <div class="row">
+    <label>__REDDIT_CLIENT_ID__
+      <input name="reddit_client_id" autocomplete="off" />
+    </label>
+    <label>__REDDIT_CLIENT_SECRET__
+      <input name="reddit_client_secret" autocomplete="off" />
+    </label>
+  </div>
+
   <div class="check"><input type="checkbox" name="enable_sentiment" /> __SENTIMENT__</div>
 
   <div class="actions">
@@ -954,6 +979,8 @@ port: __PORT__</div>
         "__SENTIMENT__": html.escape(t["sentiment"]),
         "__API_KEY__": html.escape(t["api_key"]),
         "__MODEL__": html.escape(t["model"]),
+        "__REDDIT_CLIENT_ID__": html.escape(t["reddit_client_id"]),
+        "__REDDIT_CLIENT_SECRET__": html.escape(t["reddit_client_secret"]),
         "__TRAINING_CSV__": html.escape(t["training_csv"]),
         "__THRESHOLD__": html.escape(t["threshold"]),
         "__RUN__": html.escape(t["run"]),
