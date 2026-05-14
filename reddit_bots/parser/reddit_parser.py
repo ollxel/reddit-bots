@@ -1109,7 +1109,7 @@ class RedditParser:
             body = comment.get("body", "").strip()
             comment_score = int(comment.get("score", 0) or 0)
 
-            if not author or author == post_author or author == "[deleted]":
+            if not author or author == "[deleted]":
                 continue
             if not body or body == "[removed]":
                 continue

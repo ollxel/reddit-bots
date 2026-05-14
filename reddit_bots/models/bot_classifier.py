@@ -122,8 +122,8 @@ class AccountBotClassifier:
     @staticmethod
     def _heuristic_bot_probability(row: pd.Series) -> float:
         """
-        Rule-based boost for patterns underrepresented in train data:
-        suspended/empty profiles + short keyword-salad spam text.
+        Rule-based boost for CLEAR bot patterns only.
+        Avoid false positives from normal low-activity users.
         """
         score = 0.0
         unavailable_ratio = float(row.get("unavailable_profile_ratio", 0.0) or 0.0)
@@ -133,38 +133,62 @@ class AccountBotClassifier:
         avg_sentence_length = float(row.get("avg_sentence_length", 0.0) or 0.0)
         punctuation_ratio = float(row.get("punctuation_ratio", 0.0) or 0.0)
         uppercase_ratio = float(row.get("uppercase_ratio", 0.0) or 0.0)
+        avg_comment_length = float(row.get("avg_comment_length", 0.0) or 0.0)
+        sentiment_std = float(row.get("sentiment_std", 0.0) or 0.0)
+        sentiment_mean = float(row.get("sentiment_mean", 0.0) or 0.0)
+        activity_span_days = float(row.get("activity_span_days", 0.0) or 0.0)
+        account_age_days = float(row.get("account_age_days", 0.0) or 0.0)
+        user_karma = float(row.get("user_karma", 0.0) or 0.0)
+        comment_karma = float(row.get("comment_karma", 0.0) or 0.0)
 
-        if unavailable_ratio >= 0.9:
-            score = max(score, 0.55)
-        elif unavailable_ratio >= 0.5:
-            score = max(score, 0.45)
-
-        if keyword_salad_ratio >= 0.8 and avg_comment_score <= 0 and unavailable_ratio >= 0.5:
+        # PATTERN 1: Keyword salad spam (VERY CLEAR)
+        if keyword_salad_ratio >= 0.5 and avg_comment_score <= 0:
+            score = max(score, 0.7)
+        elif keyword_salad_ratio >= 0.8:
             score = max(score, 0.8)
-        elif keyword_salad_ratio >= 0.5 and avg_comment_score <= 0:
-            score = max(score, 0.6)
 
+        # PATTERN 2: Suspended/unavailable profiles
+        # Only if combined with other spam signals
+        if unavailable_ratio >= 0.9 and keyword_salad_ratio >= 0.5:
+            score = max(score, 0.75)
+        elif unavailable_ratio >= 0.9 and avg_comment_score <= -0.5:
+            score = max(score, 0.60)
+
+        # PATTERN 3: Very short, low-quality spam comments
         if (
             comments_count <= 3
             and avg_comment_score <= 0
-            and avg_sentence_length <= 6
-            and punctuation_ratio <= 0.03
-            and uppercase_ratio <= 0.03
-            and unavailable_ratio > 0
+            and avg_comment_length <= 20  # Extremely short
+            and punctuation_ratio <= 0.02
+            and uppercase_ratio <= 0.05
         ):
-            score = max(score, 0.75)
+            score = max(score, 0.65)
+
+        # PATTERN 4: Young account + low karma + rapid posting
+        # These are classic bot creation patterns
+        if (
+            account_age_days > 0  # Account data exists
+            and account_age_days < 90  # Very new account
+            and user_karma <= 1  # Essentially no karma
+            and comment_karma <= 0
+            and comments_count >= 2
+            and activity_span_days < 0.01  # Tight activity window
+        ):
+            score = max(score, 0.70)
 
         return float(min(score, 0.99))
 
     def predict(self, account_features_df: pd.DataFrame) -> pd.DataFrame:
-        if self.model is None:
-            raise RuntimeError("Model is not trained. Call train() first.")
-
         data = self._ensure_feature_columns(account_features_df)
         X = data[ACCOUNT_FEATURES].fillna(0.0)
 
-        probabilities = self.model.predict_proba(X)
-        model_probability = probabilities[:, 1] if probabilities.shape[1] > 1 else probabilities[:, 0]
+        # Use model predictions if trained, otherwise use zero
+        if self.model is not None:
+            probabilities = self.model.predict_proba(X)
+            model_probability = probabilities[:, 1] if probabilities.shape[1] > 1 else probabilities[:, 0]
+        else:
+            model_probability = np.zeros(len(data))
+        
         heuristic_probability = data.apply(self._heuristic_bot_probability, axis=1).to_numpy(dtype=float)
         bot_probability = np.maximum(model_probability, heuristic_probability)
 
