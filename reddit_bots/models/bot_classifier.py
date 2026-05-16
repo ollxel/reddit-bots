@@ -122,61 +122,147 @@ class AccountBotClassifier:
     @staticmethod
     def _heuristic_bot_probability(row: pd.Series) -> float:
         """
-        Rule-based boost for CLEAR bot patterns only.
-        Avoid false positives from normal low-activity users.
+        Universal bot detection based on anomaly scoring.
+        Works without hard-coded patterns - detects any bot type.
+        
+        Core principle: Bots lack normal human behavior variation.
+        - Young accounts with high activity = suspicious
+        - Low engagement (karma) = suspicious
+        - Uniform behavior (low variation) = suspicious
+        - Missing/incomplete data = suspicious
+        - Spam indicators = highly suspicious
         """
-        score = 0.0
+        # Extract features
         unavailable_ratio = float(row.get("unavailable_profile_ratio", 0.0) or 0.0)
         keyword_salad_ratio = float(row.get("keyword_salad_ratio", 0.0) or 0.0)
         avg_comment_score = float(row.get("avg_comment_score", 0.0) or 0.0)
         comments_count = float(row.get("comments_count", 0.0) or 0.0)
-        avg_sentence_length = float(row.get("avg_sentence_length", 0.0) or 0.0)
         punctuation_ratio = float(row.get("punctuation_ratio", 0.0) or 0.0)
         uppercase_ratio = float(row.get("uppercase_ratio", 0.0) or 0.0)
         avg_comment_length = float(row.get("avg_comment_length", 0.0) or 0.0)
         sentiment_std = float(row.get("sentiment_std", 0.0) or 0.0)
-        sentiment_mean = float(row.get("sentiment_mean", 0.0) or 0.0)
         activity_span_days = float(row.get("activity_span_days", 0.0) or 0.0)
         account_age_days = float(row.get("account_age_days", 0.0) or 0.0)
         user_karma = float(row.get("user_karma", 0.0) or 0.0)
         comment_karma = float(row.get("comment_karma", 0.0) or 0.0)
+        avg_sentence_length = float(row.get("avg_sentence_length", 0.0) or 0.0)
+        comment_score_std = float(row.get("comment_score_std", 0.0) or 0.0)
 
-        # PATTERN 1: Keyword salad spam (VERY CLEAR)
-        if keyword_salad_ratio >= 0.5 and avg_comment_score <= 0:
-            score = max(score, 0.7)
-        elif keyword_salad_ratio >= 0.8:
-            score = max(score, 0.8)
+        # Initialize risk scores (0 = human-like, 1 = bot-like)
 
-        # PATTERN 2: Suspended/unavailable profiles
-        # Only if combined with other spam signals
-        if unavailable_ratio >= 0.9 and keyword_salad_ratio >= 0.5:
-            score = max(score, 0.75)
-        elif unavailable_ratio >= 0.9 and avg_comment_score <= -0.5:
-            score = max(score, 0.60)
+        # ===== 1. ACCOUNT AGE RISK =====
+        # Bots are often young accounts, but not always
+        # Risk decreases with age, but missing data is suspicious
+        if account_age_days == 0:
+            # API didn't return account age - suspicious but not conclusive
+            age_risk = 0.3
+        elif account_age_days < 7:
+            age_risk = 0.6  # Very fresh account
+        elif account_age_days < 30:
+            age_risk = 0.4  # Fresh account
+        elif account_age_days < 90:
+            age_risk = 0.2  # Still relatively new
+        else:
+            age_risk = 0.05  # Established account
+        
+        # ===== 2. ACTIVITY DENSITY RISK =====
+        # High activity in short timespan = suspicious
+        # Many comments with no history = bot behavior
+        effective_age = max(account_age_days, activity_span_days + 0.5)
+        if comments_count < 1:
+            activity_density = 0
+        else:
+            activity_density = comments_count / max(effective_age, 1.0)
 
-        # PATTERN 3: Very short, low-quality spam comments
-        if (
-            comments_count <= 3
-            and avg_comment_score <= 0
-            and avg_comment_length <= 20  # Extremely short
-            and punctuation_ratio <= 0.02
-            and uppercase_ratio <= 0.05
-        ):
-            score = max(score, 0.65)
+        # Activity density benchmarks: humans ~0.5 comments/day, bots 2+ comments/day
+        if activity_density > 2.0:
+            density_risk = 0.7  # Burst posting
+        elif activity_density > 1.0:
+            density_risk = 0.4
+        elif activity_density > 0.3:
+            density_risk = 0.15
+        else:
+            density_risk = 0.0
+        
+        # ===== 3. ENGAGEMENT RISK =====
+        # Bots rarely accumulate karma. Humans get upvotes.
+        # Low karma-to-comments ratio = suspicious
+        if comments_count < 1:
+            karma_per_comment = 0
+        else:
+            karma_per_comment = comment_karma / comments_count
 
-        # PATTERN 4: Young account + low karma + rapid posting
-        # These are classic bot creation patterns
-        if (
-            account_age_days > 0  # Account data exists
-            and account_age_days < 90  # Very new account
-            and user_karma <= 1  # Essentially no karma
-            and comment_karma <= 0
-            and comments_count >= 2
-            and activity_span_days < 0.01  # Tight activity window
-        ):
-            score = max(score, 0.70)
+        # Humans typically get 0.5-2 karma per comment, botted posts get 0-0.5
+        if karma_per_comment < 0:
+            engagement_risk = 0.6  # Downvoted comments
+        elif karma_per_comment < 0.1:
+            engagement_risk = 0.5  # Very low engagement
+        elif karma_per_comment < 0.3:
+            engagement_risk = 0.25
+        else:
+            engagement_risk = 0.05  # Normal human engagement
+        
+        # ===== 4. BEHAVIOR VARIATION RISK =====
+        # Humans vary their sentiment/style. Bots are uniform.
+        # Low sentiment_std + low comment_score_std = suspicious
+        variation_std = (sentiment_std + comment_score_std) / 2.0 if sentiment_std + comment_score_std > 0 else 0
 
-        return float(min(score, 0.99))
+        if variation_std < 0.01:
+            # Completely uniform behavior
+            variation_risk = 0.7
+        elif variation_std < 0.05:
+            variation_risk = 0.4
+        elif variation_std < 0.1:
+            variation_risk = 0.15
+        else:
+            variation_risk = 0.0
+        
+        # ===== 5. DATA COMPLETENESS RISK =====
+        # Missing profile data is a red flag (private/deleted/fake account)
+        if unavailable_ratio > 0.5:
+            completeness_risk = 0.4
+        else:
+            completeness_risk = 0.05
+        
+        # ===== 6. SPAM QUALITY RISK =====
+        # Keyword salad, short low-effort posts, etc.
+        if keyword_salad_ratio > 0.5:
+            quality_risk = 0.8  # Definite spam
+        elif avg_comment_length < 20 and comments_count >= 3:
+            # Multiple very short comments
+            quality_risk = 0.4
+        elif keyword_salad_ratio > 0.3:
+            quality_risk = 0.5  # Moderate spam indicators
+        else:
+            quality_risk = 0.0
+        
+        # ===== COMBINE SCORES =====
+        # Weighted average of all risk components
+        # Higher weights on universal bot behaviors (engagement + variation)
+        # Lower weights on absence of spam (not all bots spam)
+        
+        # Recalculate with better weights
+        risks_dict = {
+            "age_risk": (age_risk, 0.10),  # Young accounts but not definitive
+            "density_risk": (density_risk, 0.15),  # Rapid posting
+            "engagement_risk": (engagement_risk, 0.25),  # LOW KARMA = universal bot signal
+            "variation_risk": (variation_risk, 0.25),  # UNIFORM BEHAVIOR = universal bot signal
+            "completeness_risk": (completeness_risk, 0.10),  # Missing data
+            "quality_risk": (quality_risk, 0.15),  # Spam text
+        }
+        
+        total_weight = sum(w for _, w in risks_dict.values())
+        weighted_score = sum(score * weight for score, weight in risks_dict.values()) / total_weight
+
+        # Multiplicative boost: if multiple critical factors are high, increase score
+        critical_factors = [engagement_risk, variation_risk]  # The universal bot signals
+        if all(f >= 0.4 for f in critical_factors):
+            # Multiple strong bot indicators - boost final score
+            boost = min(0.15, sum(critical_factors) * 0.05)
+            weighted_score = min(weighted_score + boost, 0.99)
+
+        final_score = float(np.clip(weighted_score, 0.0, 0.99))
+        return final_score
 
     def predict(self, account_features_df: pd.DataFrame) -> pd.DataFrame:
         data = self._ensure_feature_columns(account_features_df)
